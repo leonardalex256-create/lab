@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { Op } from "sequelize";
 import { studentToApiRow } from "../formatting/studentRow.js";
 import {
   ClassRoom,
@@ -8,7 +9,13 @@ import {
   StudentFeeReceipt,
   StudentFeeStructure,
 } from "../models/index.js";
+import { dayRangeUtc } from "../lib/dateBounds.js";
+import {
+  listNonCompliantStudentsForTerm,
+  scheduleFeeComplianceCheckAndNotify,
+} from "../services/feeAssignmentCompliance.js";
 import { calculateStatementSummary } from "../services/pythonCalc.js";
+import { loadOfficialSchoolTermYear, resolveReadTermYearFromQuery } from "../lib/officialSchoolTermYear.js";
 
 function parseIsoDate(v: unknown): string | null {
   if (typeof v !== "string") return null;
@@ -16,21 +23,9 @@ function parseIsoDate(v: unknown): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : null;
 }
 
+/** Canonical statuses used to match students → fee rows (admin must add matching rows in Settings). */
 const BOARDING_STATUSES = ["day_half", "day_full", "day_full_p7", "boarding"] as const;
 type BoardingStatus = (typeof BOARDING_STATUSES)[number];
-const DEFAULT_IMPORTED_STRUCTURE: Record<BoardingStatus, number> = {
-  boarding: 730000,
-  day_half: 380000,
-  day_full: 400000,
-  day_full_p7: 450000,
-};
-
-const SYSTEM_STATUS_LABELS: Record<BoardingStatus, string> = {
-  boarding: "Boarding",
-  day_half: "Day Half Day",
-  day_full: "Day Full Day",
-  day_full_p7: "Day Full Day (P7)",
-};
 
 function normalizeBoardingStatus(v: unknown): BoardingStatus | null {
   if (typeof v !== "string") return null;
@@ -89,17 +84,20 @@ export function createMeFinanceStatementsRouter() {
       });
       if (!student) return res.status(404).json({ error: "Student not found" });
 
-      const termRaw = typeof req.query.term === "string" ? req.query.term.trim() : "";
-      let term = termRaw;
+      const { academicYear, term: defaultTermFromPicker } = await resolveReadTermYearFromQuery(req.query);
+      let term =
+        typeof req.query.term === "string" && req.query.term.trim() ? req.query.term.trim() : "";
       if (!term) {
         const latestReceipt = await StudentFeeReceipt.findOne({
-          where: { studentId },
+          where: { studentId, academicYear },
           order: [["created_at", "DESC"]],
         });
-        term = latestReceipt?.term ?? "Term 1";
+        term = latestReceipt?.term ?? defaultTermFromPicker;
       }
 
-      const assignment = await StudentFeeAssignment.findOne({ where: { studentId, term } });
+      const assignment = await StudentFeeAssignment.findOne({
+        where: { studentId, term, academicYear },
+      });
       const boardingStatus = normalizeStudentBoardingStatus(student.boardingStatus);
       const className = studentClassName(student);
       const feeStatus = toFeeStructureStatus(boardingStatus, className);
@@ -108,11 +106,11 @@ export function createMeFinanceStatementsRouter() {
           ? await StudentFeeStructure.findOne({ where: { term, boardingStatus: feeStatus } })
           : null;
       const payments = await StudentFeePayment.findAll({
-        where: { studentId, term },
+        where: { studentId, term, academicYear },
         order: [["created_at", "ASC"]],
       });
       const receipts = await StudentFeeReceipt.findAll({
-        where: { studentId, term },
+        where: { studentId, term, academicYear },
         order: [["created_at", "ASC"]],
       });
       const receiptById = new Map<number, StudentFeeReceipt>();
@@ -155,6 +153,7 @@ export function createMeFinanceStatementsRouter() {
         item: {
           student: studentToApiRow(student),
           term,
+          academicYear,
           assignedAmount: summary.normalizedAssignedUgx,
           totalPaid: summary.totalPaidUgx,
           outstandingAmount: summary.outstandingAmountUgx,
@@ -179,21 +178,34 @@ export function createMeFinanceStatementsRouter() {
         return res.status(400).json({ error: "Invalid studentId" });
       }
       if (!term) return res.status(400).json({ error: "term is required" });
-      if (!Number.isFinite(amountDue) || amountDue < 0) {
-        return res.status(400).json({ error: "amountDueUgx must be a valid non-negative number" });
+      if (!Number.isFinite(amountDue) || amountDue <= 0) {
+        return res
+          .status(400)
+          .json({ error: "amountDueUgx must be greater than zero (UGX)." });
+      }
+      const official = await loadOfficialSchoolTermYear();
+      if (term !== official.term) {
+        return res.status(400).json({
+          error: `Assignments must use the school's current term (${official.term}).`,
+        });
       }
       const student = await Student.findByPk(studentId);
       if (!student) return res.status(404).json({ error: "Student not found" });
-      const [row] = await StudentFeeAssignment.findOrCreate({
-        where: { studentId, term },
-        defaults: { amountDueUgx: Math.round(amountDue), notes },
+      const finalValues = { amountDueUgx: Math.round(amountDue), notes };
+      const [row, created] = await StudentFeeAssignment.findOrCreate({
+        where: { studentId, term: official.term, academicYear: official.academicYear },
+        defaults: finalValues,
       });
-      await row.update({ amountDueUgx: Math.round(amountDue), notes });
+      if (!created) {
+        await row.update(finalValues);
+      }
+      scheduleFeeComplianceCheckAndNotify();
       return res.status(201).json({
         item: {
           id: row.id,
           studentId: row.studentId,
           term: row.term,
+          academicYear: row.academicYear,
           amountDueUgx: Number(row.amountDueUgx),
           notes: row.notes ?? null,
           createdAt:
@@ -216,34 +228,13 @@ export function createMeFinanceStatementsRouter() {
         where: { term },
         order: [["boarding_status", "ASC"]],
       });
-      // Build map of all persisted rows
-      const byStatus = new Map<string, StudentFeeStructure>();
-      for (const row of rows) {
-        byStatus.set(row.boardingStatus, row);
-      }
-      // Start with the 4 system statuses
-      const items: Array<{ status: string; label: string; amountDueUgx: number; notes: string | null; isSystem: boolean }> = BOARDING_STATUSES.map((status) => {
-        const row = byStatus.get(status) ?? null;
-        return {
-          status,
-          label: row?.get("label") as string ?? SYSTEM_STATUS_LABELS[status],
-          amountDueUgx: row ? Number(row.amountDueUgx) : DEFAULT_IMPORTED_STRUCTURE[status],
-          notes: row?.notes ?? null,
-          isSystem: true,
-        };
-      });
-      // Append any custom (non-system) rows
-      for (const row of rows) {
-        if (!BOARDING_STATUSES.includes(row.boardingStatus as BoardingStatus)) {
-          items.push({
-            status: row.boardingStatus,
-            label: (row.get("label") as string) ?? row.boardingStatus,
-            amountDueUgx: Number(row.amountDueUgx),
-            notes: row.notes ?? null,
-            isSystem: false,
-          });
-        }
-      }
+      const items = rows.map((row) => ({
+        status: row.boardingStatus,
+        label: ((row.get("label") as string | null) ?? "").trim() || row.boardingStatus,
+        amountDueUgx: Number(row.amountDueUgx),
+        notes: row.notes ?? null,
+        isSystem: false,
+      }));
       return res.json({ items });
     } catch (err) {
       console.error(err);
@@ -288,30 +279,43 @@ export function createMeFinanceStatementsRouter() {
 
       const txn = await StudentFeeStructure.sequelize!.transaction();
       let updatedAssignments = 0;
+      const { academicYear } = await loadOfficialSchoolTermYear();
       try {
-        // Delete removed custom entities
         for (const delStatus of deleteStatuses) {
-          if (!BOARDING_STATUSES.includes(delStatus as BoardingStatus)) {
-            await StudentFeeStructure.destroy({ where: { term, boardingStatus: delStatus }, transaction: txn });
-          }
+          await StudentFeeStructure.destroy({
+            where: { term, boardingStatus: delStatus },
+            transaction: txn,
+          });
+        }
+
+        // Load all students once instead of re-querying per status; without the
+        // include we cannot compute the effective fee status from boarding+class.
+        const allStudents = await Student.findAll({
+          attributes: ["id", "boardingStatus"],
+          include: [{ model: ClassRoom, as: "classRoom", required: false, attributes: ["name"] }],
+          transaction: txn,
+        });
+
+        const studentsByEffectiveStatus = new Map<BoardingStatus, Array<{ id: number }>>();
+        for (const stu of allStudents) {
+          const stBoarding = normalizeStudentBoardingStatus(stu.boardingStatus);
+          const stClassName = studentClassName(stu);
+          const stStatus = toFeeStructureStatus(stBoarding, stClassName);
+          if (!stStatus) continue;
+          const list = studentsByEffectiveStatus.get(stStatus) ?? [];
+          list.push({ id: stu.id });
+          studentsByEffectiveStatus.set(stStatus, list);
         }
 
         for (const [status, item] of uniqueByStatus.entries()) {
-          const [row] = await StudentFeeStructure.findOrCreate({
-            where: { term, boardingStatus: status },
-            defaults: {
-              amountDueUgx: item.amountDueUgx,
-              notes: item.notes,
-              label: item.label,
-            },
-            transaction: txn,
-          });
-          await row.update(
+          await StudentFeeStructure.upsert(
             {
+              term,
+              boardingStatus: status,
               amountDueUgx: item.amountDueUgx,
               notes: item.notes,
               label: item.label,
-            },
+            } as any,
             { transaction: txn },
           );
 
@@ -319,33 +323,21 @@ export function createMeFinanceStatementsRouter() {
           const boardingStatus = normalizeBoardingStatus(status);
           if (!boardingStatus) continue;
 
-          const students = await Student.findAll({
-            attributes: ["id", "boardingStatus"],
-            include: [{ model: ClassRoom, as: "classRoom", required: false, attributes: ["name"] }],
+          const targets = studentsByEffectiveStatus.get(boardingStatus) ?? [];
+          if (targets.length === 0) continue;
+
+          const rows = targets.map((stu) => ({
+            studentId: stu.id,
+            term,
+            academicYear,
+            amountDueUgx: item.amountDueUgx,
+            notes: item.notes,
+          }));
+          await StudentFeeAssignment.bulkCreate(rows as any, {
+            updateOnDuplicate: ["amountDueUgx", "notes"],
             transaction: txn,
           });
-          for (const stu of students) {
-            const stBoarding = normalizeStudentBoardingStatus(stu.boardingStatus);
-            const stClassName = studentClassName(stu);
-            const stStatus = toFeeStructureStatus(stBoarding, stClassName);
-            if (stStatus !== boardingStatus) continue;
-            const [assignment] = await StudentFeeAssignment.findOrCreate({
-              where: { studentId: stu.id, term },
-              defaults: {
-                amountDueUgx: item.amountDueUgx,
-                notes: item.notes,
-              },
-              transaction: txn,
-            });
-            await assignment.update(
-              {
-                amountDueUgx: item.amountDueUgx,
-                notes: item.notes,
-              },
-              { transaction: txn },
-            );
-            updatedAssignments += 1;
-          }
+          updatedAssignments += targets.length;
         }
         await txn.commit();
       } catch (e) {
@@ -368,10 +360,9 @@ export function createMeFinanceStatementsRouter() {
   r.get("/finance/fees/assignments", async (req, res) => {
     try {
       const studentIdRaw = Number(req.query.studentId);
-      const termRaw = typeof req.query.term === "string" ? req.query.term.trim() : "";
-      const where: Record<string, unknown> = {};
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
+      const where: Record<string, unknown> = { term, academicYear };
       if (Number.isFinite(studentIdRaw) && studentIdRaw > 0) where.studentId = studentIdRaw;
-      if (termRaw) where.term = termRaw;
       const rows = await StudentFeeAssignment.findAll({
         where,
         order: [
@@ -384,6 +375,7 @@ export function createMeFinanceStatementsRouter() {
           id: x.id,
           studentId: x.studentId,
           term: x.term,
+          academicYear: x.academicYear,
           amountDueUgx: Number(x.amountDueUgx),
           notes: x.notes ?? null,
           createdAt:
@@ -398,6 +390,17 @@ export function createMeFinanceStatementsRouter() {
     }
   });
 
+  r.get("/finance/fees/compliance", async (req, res) => {
+    try {
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
+      const items = await listNonCompliantStudentsForTerm(term, academicYear);
+      return res.json({ term, academicYear, count: items.length, items });
+    } catch (err) {
+      console.error(err);
+      return res.status(503).json({ error: "Database unavailable" });
+    }
+  });
+
   r.get("/finance/statements", async (req, res) => {
     try {
       const studentIdRaw = Number(req.query.studentId);
@@ -406,7 +409,11 @@ export function createMeFinanceStatementsRouter() {
       const limit = Number.isFinite(lim) ? Math.max(1, Math.min(100, lim)) : 20;
       const where: Record<string, unknown> = {};
       if (Number.isFinite(studentIdRaw) && studentIdRaw > 0) where.studentId = studentIdRaw;
-      if (onDate) where.createdAt = `${onDate}%`;
+      if (onDate) {
+        // Previously `createdAt = "${onDate}%"`, which Sequelize treated as a
+        // literal equality check (never matched). Span the UTC calendar day.
+        where.createdAt = { [Op.between]: dayRangeUtc(onDate) };
+      }
       const rows = await StudentFeeReceipt.findAll({
         where,
         order: [["created_at", "DESC"]],

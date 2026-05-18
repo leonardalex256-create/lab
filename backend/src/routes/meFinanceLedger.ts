@@ -11,6 +11,7 @@ import {
   User,
   UserPermissionOverride,
 } from "../models/index.js";
+import { dayRangeUtc } from "../lib/dateBounds.js";
 
 function ymd(d = new Date()): string {
   const y = d.getFullYear();
@@ -92,8 +93,7 @@ export function createMeFinanceLedgerRouter() {
           });
         }
       }
-      const start = `${dateRaw} 00:00:00`;
-      const end = `${dateRaw} 23:59:59`;
+      const [start, end] = dayRangeUtc(dateRaw);
 
       const [payments, expenses, report] = await Promise.all([
         StudentFeePayment.findAll({

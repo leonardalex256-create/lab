@@ -12,6 +12,8 @@ import {
   User,
   UserNotification,
 } from "../models/index.js";
+import { resolveReadTermYearFromQuery } from "../lib/officialSchoolTermYear.js";
+import { dayRangeUtc } from "../lib/dateBounds.js";
 
 function ymd(d = new Date()): string {
   const y = d.getFullYear();
@@ -56,7 +58,13 @@ async function requestRole(userId: number | null | undefined): Promise<string> {
 }
 
 async function ensureAdmin(userId: number | null | undefined): Promise<boolean> {
-  return (await requestRole(userId)) === "admin";
+  const role = await requestRole(userId);
+  return role === "admin" || role === "super_admin";
+}
+
+function isAdminRoleString(role: string | null | undefined): boolean {
+  const r = (role ?? "").trim().toLowerCase();
+  return r === "admin" || r === "super_admin";
 }
 
 async function notifyAdminsReportSubmitted(reportDate: string, submittedByUserId: number | null) {
@@ -86,21 +94,6 @@ export function createMeFinanceReportsRouter() {
   r.get("/finance/reports/daily", async (req, res) => {
     try {
       const isAdmin = await ensureAdmin(req.userId ?? null);
-      // #region agent log
-      fetch("http://127.0.0.1:7892/ingest/16abbfe8-e461-4655-b535-5e0791d093a7", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6885fa" },
-        body: JSON.stringify({
-          sessionId: "6885fa",
-          runId: "initial",
-          hypothesisId: "H2",
-          location: "backend/src/routes/meFinanceReports.ts:52",
-          message: "daily_reports_access_check",
-          data: { userId: req.userId ?? null, isAdmin },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       if (!isAdmin) {
         return res.status(403).json({ error: "Admin only" });
       }
@@ -115,16 +108,15 @@ export function createMeFinanceReportsRouter() {
         limit,
       });
       const reportDates = rows.map((rpt) => rpt.reportDate);
+      const earliest = reportDates[reportDates.length - 1];
+      const latest = reportDates[0];
       const paymentsByDate = await StudentFeePayment.findAll({
         attributes: [[fn("DATE", col("created_at")), "d"], [fn("SUM", col("amount_paid_ugx")), "v"]],
         where:
-          reportDates.length > 0
+          earliest && latest
             ? {
                 createdAt: {
-                  [Op.between]: [
-                    `${reportDates[reportDates.length - 1]} 00:00:00`,
-                    `${reportDates[0]} 23:59:59`,
-                  ],
+                  [Op.between]: [dayRangeUtc(earliest)[0], dayRangeUtc(latest)[1]],
                 },
               }
             : undefined,
@@ -178,21 +170,6 @@ export function createMeFinanceReportsRouter() {
   r.post("/finance/reports/daily/submit", async (req, res) => {
     try {
       const isAdmin = await ensureAdmin(req.userId ?? null);
-      // #region agent log
-      fetch("http://127.0.0.1:7892/ingest/16abbfe8-e461-4655-b535-5e0791d093a7", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6885fa" },
-        body: JSON.stringify({
-          sessionId: "6885fa",
-          runId: "initial",
-          hypothesisId: "H3",
-          location: "backend/src/routes/meFinanceReports.ts:142",
-          message: "submit_report_role_check",
-          data: { userId: req.userId ?? null, isAdmin },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       if (isAdmin) {
         return res.status(403).json({ error: "Admin cannot submit reports" });
       }
@@ -201,33 +178,49 @@ export function createMeFinanceReportsRouter() {
         typeof body.reportDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.reportDate)
           ? body.reportDate
           : ymd();
-      const existing = await DailyFinanceReport.findOne({ where: { reportDate } });
-      if (existing?.status === "closed") {
-        return res.status(409).json({ error: "Report is sealed. Admin must reopen it first." });
-      }
-      if (existing?.reopenedForUserId && existing.reopenedForUserId !== req.userId) {
-        return res.status(403).json({ error: "This reopened report is assigned to a different user." });
-      }
-      const [row] = await DailyFinanceReport.findOrCreate({
-        where: { reportDate },
-        defaults: {
+
+      const sequelize = DailyFinanceReport.sequelize;
+      if (!sequelize) return res.status(500).json({ error: "Database not initialized" });
+
+      type SubmitOk = { kind: "ok"; id: number; status: string };
+      type SubmitErr = { kind: "err"; status: number; body: { error: string } };
+      const result = await sequelize.transaction(async (t): Promise<SubmitOk | SubmitErr> => {
+        const existing = await DailyFinanceReport.findOne({
+          where: { reportDate },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+        if (existing?.status === "closed") {
+          return { kind: "err", status: 409, body: { error: "Report is sealed. Admin must reopen it first." } };
+        }
+        if (existing?.reopenedForUserId && existing.reopenedForUserId !== req.userId) {
+          return { kind: "err", status: 403, body: { error: "This reopened report is assigned to a different user." } };
+        }
+        const finalValues = {
           status: "submitted",
           submittedByUserId: req.userId ?? null,
           submittedAt: new Date(),
+          reopenedForUserId: null,
           isReopened: false,
-        },
+          reopenedReason: null,
+        };
+        const [row, created] = await DailyFinanceReport.findOrCreate({
+          where: { reportDate },
+          defaults: finalValues,
+          transaction: t,
+        });
+        if (!created) {
+          await row.update(finalValues, { transaction: t });
+        }
+        return { kind: "ok", id: row.id, status: row.status };
       });
-      await row.update({
-        status: "submitted",
-        submittedByUserId: req.userId ?? null,
-        submittedAt: new Date(),
-        reopenedForUserId: null,
-        isReopened: false,
-        reopenedReason: null,
-      });
-      await appendAudit(row.id, req.userId ?? null, "submit_report");
+
+      if (result.kind === "err") {
+        return res.status(result.status).json(result.body);
+      }
+      await appendAudit(result.id, req.userId ?? null, "submit_report");
       await notifyAdminsReportSubmitted(reportDate, req.userId ?? null);
-      return res.json({ ok: true, id: row.id, status: row.status });
+      return res.json({ ok: true, id: result.id, status: result.status });
     } catch (err) {
       console.error(err);
       return res.status(503).json({ error: "Database unavailable" });
@@ -259,40 +252,52 @@ export function createMeFinanceReportsRouter() {
         attributes: ["id", "email", "role"],
       });
       if (!assignee) return res.status(404).json({ error: "Assigned user not found" });
-      if ((assignee.role ?? "").trim().toLowerCase() === "admin") {
+      if (isAdminRoleString(assignee.role)) {
         return res.status(400).json({ error: "Assigned user must be a non-admin authorized user" });
       }
 
-      const [row] = await DailyFinanceReport.findOrCreate({
-        where: { reportDate },
-        defaults: {
+      const sequelize = DailyFinanceReport.sequelize;
+      if (!sequelize) return res.status(500).json({ error: "Database not initialized" });
+
+      type RequestOk = { kind: "ok"; id: number; status: string };
+      type RequestErr = { kind: "err"; status: number; body: { error: string } };
+      const result = await sequelize.transaction(async (t): Promise<RequestOk | RequestErr> => {
+        const existing = await DailyFinanceReport.findOne({
+          where: { reportDate },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+        if (existing?.status === "closed") {
+          return { kind: "err", status: 409, body: { error: "Report is sealed. Reopen it first before requesting." } };
+        }
+        const finalValues = {
           status: "not_submitted",
           submittedByUserId: null,
           submittedAt: null,
+          reviewedByUserId: null,
+          reviewedAt: null,
           isReopened: true,
           reopenedReason: reason,
           reopenedForUserId: requestForUserId,
-        },
+          adminNotes: null,
+        };
+        const [row, created] = await DailyFinanceReport.findOrCreate({
+          where: { reportDate },
+          defaults: finalValues,
+          transaction: t,
+        });
+        if (!created) {
+          await row.update(finalValues, { transaction: t });
+        }
+        return { kind: "ok", id: row.id, status: row.status };
       });
 
-      if (row.status === "closed") {
-        return res.status(409).json({ error: "Report is sealed. Reopen it first before requesting." });
+      if (result.kind === "err") {
+        return res.status(result.status).json(result.body);
       }
 
-      await row.update({
-        status: "not_submitted",
-        submittedByUserId: null,
-        submittedAt: null,
-        reviewedByUserId: null,
-        reviewedAt: null,
-        isReopened: true,
-        reopenedReason: reason,
-        reopenedForUserId: requestForUserId,
-        adminNotes: null,
-      });
-
       await appendAudit(
-        row.id,
+        result.id,
         req.userId ?? null,
         "request_report_submission",
         `Requested from ${assignee.email}. Reason: ${reason}`,
@@ -304,7 +309,7 @@ export function createMeFinanceReportsRouter() {
         body: `Admin requested daily ledger submission for ${reportDate}. Reason: ${reason}`,
       });
 
-      return res.json({ ok: true, id: row.id, status: row.status });
+      return res.json({ ok: true, id: result.id, status: result.status });
     } catch (err) {
       console.error(err);
       return res.status(503).json({ error: "Database unavailable" });
@@ -361,21 +366,6 @@ export function createMeFinanceReportsRouter() {
       const body = req.body as Record<string, unknown>;
       const adminNotes =
         typeof body.adminNotes === "string" ? body.adminNotes.trim().slice(0, 500) : "";
-      // #region agent log
-      fetch("http://127.0.0.1:7892/ingest/16abbfe8-e461-4655-b535-5e0791d093a7", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6885fa" },
-        body: JSON.stringify({
-          sessionId: "6885fa",
-          runId: "initial",
-          hypothesisId: "H4",
-          location: "backend/src/routes/meFinanceReports.ts:236",
-          message: "seal_report_input",
-          data: { reportId: id, hasComment: adminNotes.length > 0, commentLength: adminNotes.length },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: "Invalid id" });
       if (!adminNotes) return res.status(400).json({ error: "Admin comment is required before sealing" });
       const result = await sealReport(id, req.userId ?? null, adminNotes);
@@ -416,26 +406,6 @@ export function createMeFinanceReportsRouter() {
       const reason =
         typeof body.reason === "string" ? body.reason.trim().slice(0, 255) : "";
       const reopenForUserId = Number(body.reopenForUserId);
-      // #region agent log
-      fetch("http://127.0.0.1:7892/ingest/16abbfe8-e461-4655-b535-5e0791d093a7", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6885fa" },
-        body: JSON.stringify({
-          sessionId: "6885fa",
-          runId: "initial",
-          hypothesisId: "H5",
-          location: "backend/src/routes/meFinanceReports.ts:286",
-          message: "reopen_report_input",
-          data: {
-            reportId: id,
-            hasReason: reason.length > 0,
-            reasonLength: reason.length,
-            reopenForUserId: Number.isFinite(reopenForUserId) ? reopenForUserId : null,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: "Invalid id" });
       if (!reason) return res.status(400).json({ error: "reason is required" });
       if (!Number.isFinite(reopenForUserId) || reopenForUserId < 1) {
@@ -445,7 +415,7 @@ export function createMeFinanceReportsRouter() {
         attributes: ["id", "email", "role"],
       });
       if (!reopenForUser) return res.status(404).json({ error: "Assigned user not found" });
-      if ((reopenForUser.role ?? "").trim().toLowerCase() === "admin") {
+      if (isAdminRoleString(reopenForUser.role)) {
         return res.status(400).json({ error: "Assigned user must be a non-admin authorized user" });
       }
       const row = await DailyFinanceReport.findByPk(id);
@@ -477,7 +447,7 @@ export function createMeFinanceReportsRouter() {
       }
       const users = await User.findAll({
         attributes: ["id", "email", "role"],
-        where: { role: { [Op.ne]: "admin" } },
+        where: { role: { [Op.notIn]: ["admin", "super_admin"] } },
         order: [["email", "ASC"]],
       });
       return res.json({
@@ -491,16 +461,16 @@ export function createMeFinanceReportsRouter() {
 
   r.get("/finance/reports/debtors", async (req, res) => {
     try {
-      const requestedTerm = typeof req.query.term === "string" ? req.query.term.trim() : "";
+      const { term: requestedTerm, academicYear } = await resolveReadTermYearFromQuery(req.query);
 
       const students = await Student.findAll({
         include: [{ model: ClassRoom, as: "classRoom", required: false }],
         order: [["admission_number", "ASC"]],
       });
 
-      const assignmentWhere = requestedTerm ? { term: requestedTerm } : undefined;
-      const structureWhere = requestedTerm ? { term: requestedTerm } : undefined;
-      const paymentWhere = requestedTerm ? { term: requestedTerm } : undefined;
+      const assignmentWhere = { term: requestedTerm, academicYear };
+      const structureWhere = { term: requestedTerm };
+      const paymentWhere = { term: requestedTerm, academicYear };
 
       const assignments = await StudentFeeAssignment.findAll({ where: assignmentWhere });
       const structures = await StudentFeeStructure.findAll({ where: structureWhere });
@@ -525,16 +495,7 @@ export function createMeFinanceReportsRouter() {
         paidMap.set(`${p.studentId}::${p.term}`, Number(p.get("totalPaid")) || 0);
       }
 
-      const terms = requestedTerm
-        ? [requestedTerm]
-        : Array.from(
-            new Set<string>([
-              ...assignments.map((x) => x.term),
-              ...structures.map((x) => x.term),
-              ...payments.map((x) => x.term),
-            ]),
-          );
-      if (terms.length === 0) terms.push("Term 1");
+      const terms = [requestedTerm];
 
       const debtors = students
         .map((s) => {
@@ -574,7 +535,8 @@ export function createMeFinanceReportsRouter() {
       const totalOutstanding = debtors.reduce((acc, d) => acc + d.balance, 0);
 
       return res.json({
-        term: requestedTerm || "All Terms",
+        term: requestedTerm,
+        academicYear,
         totalOutstanding,
         items: debtors,
       });

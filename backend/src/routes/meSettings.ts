@@ -2,6 +2,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { appendDebugNdjson } from "../debugSessionLog.js";
 import { User, SchoolSetting } from "../models/index.js";
+import { requirePermission } from "../middleware/requirePermission.js";
+import { scheduleFeeComplianceCheckAndNotify } from "../services/feeAssignmentCompliance.js";
 
 const updateGeneralSettingsSchema = z.object({
   settings: z.record(z.string()),
@@ -68,19 +70,8 @@ export function createMeSettingsRouter() {
     }
   });
 
-  r.post("/general", async (req, res) => {
+  r.post("/general", requirePermission("settings_general"), async (req, res) => {
     const userId = req.userId!;
-    
-    // Authorization check
-    try {
-      const user = await User.findByPk(userId);
-      if (!user || (user.role !== "super_admin" && user.role !== "admin")) {
-        return res.status(403).json({ error: "Access denied" });
-      }
-    } catch (err) {
-      console.error(err);
-      return res.status(503).json({ error: "Database unavailable" });
-    }
 
     const parsed = updateGeneralSettingsSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -114,6 +105,10 @@ export function createMeSettingsRouter() {
         if (row.settingValue !== null) {
           settingsMap[row.settingKey] = row.settingValue;
         }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(settings, "current_term")) {
+        scheduleFeeComplianceCheckAndNotify();
       }
 
       return res.json({ message: "Settings updated successfully", settings: settingsMap });

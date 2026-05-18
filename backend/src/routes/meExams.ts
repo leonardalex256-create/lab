@@ -9,6 +9,7 @@ import {
   User,
   UserClassAuthorization,
 } from "../models/index.js";
+import { resolveReadTermYearFromQuery } from "../lib/officialSchoolTermYear.js";
 
 function trimStr(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
@@ -101,7 +102,7 @@ export function createMeExamsRouter() {
   r.get("/exams/performance-summary", async (req, res) => {
     try {
       const userId = req.userId!;
-      const term = trimStr(req.query.term, 20) ?? "Term 1";
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
       const classes = await getAccessibleClassrooms(userId);
       const classIds = classes.map((x) => x.id);
 
@@ -109,7 +110,7 @@ export function createMeExamsRouter() {
 
       // Aggregate average scores per class for the term
       const results = await StudentAssessmentResult.findAll({
-        where: { term, classRoomId: { [Op.in]: classIds } },
+        where: { term, academicYear, classRoomId: { [Op.in]: classIds } },
         attributes: ["classRoomId", [fn("AVG", col("score")), "avgScore"]],
         group: ["classRoomId"],
         include: [{ model: ClassRoom, as: "classRoom", attributes: ["name"] }],
@@ -131,12 +132,12 @@ export function createMeExamsRouter() {
   r.get("/exams/results", async (req, res) => {
     try {
       const userId = req.userId!;
-      const term = trimStr(req.query.term, 20);
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
       const examType = trimStr(req.query.examType, 40);
       const classRoomId = Number(req.query.classRoomId);
 
-      if (!term || !examType || isNaN(classRoomId)) {
-        return res.status(400).json({ error: "term, examType, and classRoomId are required" });
+      if (!examType || isNaN(classRoomId)) {
+        return res.status(400).json({ error: "examType and classRoomId are required" });
       }
 
       const classes = await getAccessibleClassrooms(userId);
@@ -145,7 +146,7 @@ export function createMeExamsRouter() {
       }
 
       const results = await StudentAssessmentResult.findAll({
-        where: { term, examType, classRoomId },
+        where: { term, academicYear, examType, classRoomId },
         include: [{ model: Student, as: "student", attributes: ["firstName", "lastName", "admissionNumber"] }],
         order: [[{ model: Student, as: "student" }, "firstName", "ASC"]],
       });

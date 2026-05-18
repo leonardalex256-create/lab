@@ -18,10 +18,13 @@ export function StudentsSectionPage({
   section,
   classNameFilter = null,
   onChangeSection,
+  permissions,
 }: {
   section: StudentNavSection;
   classNameFilter?: string | null;
   onChangeSection?: (value: StudentNavSection) => void;
+  /** User permissions array — when provided, gates edit/delete/export in child components. Omit for admin (all allowed). */
+  permissions?: string[];
 }) {
   const { t } = useI18n();
   const [listRefresh, setListRefresh] = useState(0);
@@ -32,7 +35,7 @@ export function StudentsSectionPage({
     if (section !== "overview") return;
     let cancelled = false;
     setOverviewLoading(true);
-    void fetchStudents({ sortBy: "date", sortDir: "desc", limit: 500 })
+    void fetchStudents({ sortBy: "date", sortDir: "desc", limit: 200 })
       .then((data) => {
         if (!cancelled) {
           setOverviewRows(data.items);
@@ -78,27 +81,6 @@ export function StudentsSectionPage({
       recentStudents: rows.slice(0, 6),
     };
   }, [overviewRows, classNameFilter]);
-
-  const titleKey =
-    section === "admissions"
-      ? "students.page.admissionsTitle"
-      : section === "import"
-        ? "students.page.importTitle"
-      : section === "parents"
-        ? "students.page.parentsTitle"
-      : section === "profiles"
-        ? "students.page.profilesTitle"
-        : "students.page.allTitle";
-  const introKey =
-    section === "admissions"
-      ? "students.page.introAdmissions"
-      : section === "import"
-        ? "students.page.introImport"
-      : section === "parents"
-        ? "students.page.introParents"
-      : section === "profiles"
-        ? "students.page.introProfiles"
-        : "students.page.introAll";
 
   if (section === "overview") {
     const cards: Array<{
@@ -262,11 +244,6 @@ export function StudentsSectionPage({
 
   return (
     <div className="min-w-0 space-y-6">
-      <header className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h1 className="text-2xl font-black tracking-tight text-slate-800">{t(titleKey)}</h1>
-        <p className="mt-1 text-sm font-medium text-slate-500">{t(introKey)}</p>
-      </header>
-
       {section === "admissions" ? (
         <NewAdmissionForm onCreated={() => setListRefresh((k) => k + 1)} />
       ) : section === "import" ? (
@@ -280,6 +257,7 @@ export function StudentsSectionPage({
           refreshKey={listRefresh}
           classNameFilter={classNameFilter}
           title=""
+          permissions={permissions}
         />
       )}
     </div>

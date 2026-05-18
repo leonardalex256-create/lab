@@ -9,6 +9,16 @@ export type DashboardStats = {
   totalEnquiries: number;
   allMessages: number;
   presentToday: number;
+  // Registrar / staff / student scoped stats (optional, role-specific)
+  newAdmissionsThisTerm?: number;
+  linkedParents?: number;
+  incompleteProfiles?: number;
+  activeNotices?: number;
+  unreadMessages?: number;
+  feeBalance?: number;
+  attendanceRate?: number;
+  mySubjectsCount?: number;
+  lastExamAverage?: number;
 };
 
 export type DashboardKpis = {
@@ -69,7 +79,15 @@ export type DashboardSocialTile = {
   className: string;
 };
 
+export type DashboardViewMeta = {
+  term: string | null;
+  academicYear: string | null;
+  calendarMonth: string;
+  kpisAreGlobal: boolean;
+};
+
 export type DashboardPayload = {
+  meta?: DashboardViewMeta;
   stats: DashboardStats;
   kpis: DashboardKpis;
   snapshot: DashboardSnapshot;
@@ -79,6 +97,31 @@ export type DashboardPayload = {
   learners: DashboardLearner[];
   notices: DashboardNotice[];
   expenses: DashboardExpenseRow[];
+  // role-scoped fields (optional)
+  userName?: string;
+  availableExamTypes?: string[];
+  academicAlerts?: Array<{ level: "warning" | "danger" | "info"; message: string }>;
+  registrarActions?: Array<{
+    type: "missing_parent" | "incomplete_profile" | "pending_approval";
+    studentName: string;
+    detail: string;
+  }>;
+  learner?: {
+    id: number;
+    title: string;
+    name: string;
+    gender: string;
+    admissionNumber: string;
+    admissionDate: string;
+    className: string;
+    section: string;
+  };
+  linkedChildren?: Array<{
+    id: number;
+    name: string;
+    className: string;
+    admissionNumber: string;
+  }>;
 };
 
 async function readJson<T>(res: Response): Promise<T> {
@@ -89,11 +132,18 @@ async function readJson<T>(res: Response): Promise<T> {
 
 export async function fetchDashboard(opts?: {
   calendarMonth?: string;
+  term?: string;
+  academicYear?: string;
 }): Promise<DashboardPayload> {
-  const q =
-    opts?.calendarMonth && /^\d{4}-\d{2}$/.test(opts.calendarMonth)
-      ? `?calendarMonth=${encodeURIComponent(opts.calendarMonth)}`
-      : "";
+  const params = new URLSearchParams();
+  if (opts?.calendarMonth && /^\d{4}-\d{2}$/.test(opts.calendarMonth)) {
+    params.set("calendarMonth", opts.calendarMonth);
+  }
+  if (opts?.term?.trim()) params.set("term", opts.term.trim());
+  if (opts?.academicYear?.trim() && /^\d{4}$/.test(opts.academicYear.trim())) {
+    params.set("academicYear", opts.academicYear.trim());
+  }
+  const q = params.toString() ? `?${params.toString()}` : "";
   const res = await fetch(apiUrl(`/api/me/dashboard${q}`), {
     headers: { ...authHeaders() },
   });

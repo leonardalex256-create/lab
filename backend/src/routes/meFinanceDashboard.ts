@@ -7,6 +7,7 @@ import {
   Student,
   StudentFeePayment,
 } from "../models/index.js";
+import { dayRangeUtc, monthRangeUtc } from "../lib/dateBounds.js";
 
 type StudentPaymentWithStudent = StudentFeePayment & {
   student?: {
@@ -35,6 +36,9 @@ export function createMeFinanceDashboardRouter() {
       const monthStart = `${monthKey}-01`;
       const monthEnd = `${monthKey}-${String(new Date(y, m, 0).getDate()).padStart(2, "0")}`;
 
+      const todayBounds = dayRangeUtc(today);
+      const monthBounds = monthRangeUtc(monthKey);
+
       const [
         todayPaymentsRaw,
         todayExpensesRaw,
@@ -46,7 +50,7 @@ export function createMeFinanceDashboardRouter() {
         recentExpenses,
       ] = await Promise.all([
         StudentFeePayment.sum("amount_paid_ugx", {
-          where: { createdAt: { [Op.between]: [`${today} 00:00:00`, `${today} 23:59:59`] } },
+          where: { createdAt: { [Op.between]: todayBounds } },
         }),
         DailyExpenseEntry.sum("amount_ugx", { where: { expenseDate: today } }),
         DailyFinanceReport.findOne({ where: { reportDate: today } }),
@@ -55,7 +59,7 @@ export function createMeFinanceDashboardRouter() {
           order: [["created_at", "DESC"]],
         }),
         StudentFeePayment.sum("amount_paid_ugx", {
-          where: { createdAt: { [Op.between]: [`${monthStart} 00:00:00`, `${monthEnd} 23:59:59`] } },
+          where: { createdAt: { [Op.between]: monthBounds } },
         }),
         DailyExpenseEntry.sum("amount_ugx", {
           where: { expenseDate: { [Op.between]: [monthStart, monthEnd] } },
@@ -76,7 +80,7 @@ export function createMeFinanceDashboardRouter() {
           "paymentMethod",
           [fn("SUM", col("amount_paid_ugx")), "total"],
         ],
-        where: { createdAt: { [Op.between]: [`${monthStart} 00:00:00`, `${monthEnd} 23:59:59`] } },
+        where: { createdAt: { [Op.between]: monthBounds } },
         group: ["paymentMethod"],
       });
 

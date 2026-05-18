@@ -17,6 +17,7 @@ import {
   StaffMember,
   Student,
   UserMessage,
+  User,
 } from "../models/index.js";
 
 function formatFollowerSub(n: number): string {
@@ -85,8 +86,19 @@ export function createMeDashboardRouter(config: Config) {
   const r = Router();
 
   r.get("/dashboard", async (req, res) => {
-    const ymRaw =
+    const termRaw =
+      typeof req.query.term === "string" ? req.query.term.trim() : "";
+    const viewingTerm =
+      termRaw === "Term 1" || termRaw === "Term 2" || termRaw === "Term 3" ? termRaw : null;
+    const academicYearRaw =
+      typeof req.query.academicYear === "string" ? req.query.academicYear.trim() : "";
+    const viewingAcademicYear = /^\d{4}$/.test(academicYearRaw) ? academicYearRaw : null;
+
+    let ymRaw =
       typeof req.query.calendarMonth === "string" ? req.query.calendarMonth.trim() : "";
+    if (!/^\d{4}-\d{2}$/.test(ymRaw) && viewingAcademicYear) {
+      ymRaw = `${viewingAcademicYear}-04`;
+    }
     const calendarMonth = /^\d{4}-\d{2}$/.test(ymRaw) ? ymRaw : "2026-04";
     const { start, end } = monthRange(calendarMonth);
     const [y, m] = calendarMonth.split("-").map(Number);
@@ -98,6 +110,22 @@ export function createMeDashboardRouter(config: Config) {
     try {
       const today = todayDateOnly();
       const sequelize = Student.sequelize!;
+
+      const userId = req.userId ?? null;
+      const userRow = userId ? await User.findByPk(userId, { attributes: ["fullName", "email", "role"] }) : null;
+      const userName = userRow?.fullName ?? userRow?.email ?? "User";
+      const userRole = (userRow?.role ?? "").toLowerCase();
+
+      const isParent = userRole === "parent" && Boolean(userRow?.email);
+      const loadParentChildren = () =>
+        isParent
+          ? Student.findAll({
+              where: { parentEmail: userRow!.email },
+              include: [{ model: ClassRoom, as: "classRoom", required: false }],
+              order: [["id", "ASC"]],
+              limit: 10,
+            })
+          : Promise.resolve([] as Student[]);
 
       const loadAggregate = () =>
         Promise.all([
@@ -139,6 +167,7 @@ export function createMeDashboardRouter(config: Config) {
             limit: 4,
           }),
           ClassRoom.count(),
+          loadParentChildren(),
         ]);
 
       let batch: Awaited<ReturnType<typeof loadAggregate>>;
@@ -169,6 +198,7 @@ export function createMeDashboardRouter(config: Config) {
         kpiRows,
         learnerRows,
         activeClassRooms,
+        parentChildrenRows,
       ] = batch;
 
       const parentRows = (await sequelize.query(
@@ -241,6 +271,14 @@ export function createMeDashboardRouter(config: Config) {
       });
 
       return res.json({
+        meta: {
+          term: viewingTerm,
+          academicYear: viewingAcademicYear,
+          calendarMonth,
+          /** KPI row values are not filtered by term/year in this release. */
+          kpisAreGlobal: true,
+        },
+        userName,
         stats: {
           totalStudents,
           totalTeachers,
@@ -250,6 +288,11 @@ export function createMeDashboardRouter(config: Config) {
           totalEnquiries,
           allMessages,
           presentToday,
+          // role scoped placeholders (filled as backend adds true calculations)
+          ...(userRole === "registrar"
+            ? { newAdmissionsThisTerm: 0, linkedParents: totalParents, incompleteProfiles: 0 }
+            : {}),
+          ...(userRole === "staff" ? { activeNotices: noticeRows.length, unreadMessages: 0 } : {}),
         },
         kpis: {
           dueFees: kpiMap.due_fees ?? "—",
@@ -272,6 +315,22 @@ export function createMeDashboardRouter(config: Config) {
         learners,
         notices,
         expenses,
+        availableExamTypes: ["BOT", "MID", "EOT"],
+        academicAlerts: [],
+        registrarActions: [],
+        ...(isParent
+          ? {
+              linkedChildren: parentChildrenRows.map((s) => {
+                const cr = s.get("classRoom") as ClassRoom | null | undefined;
+                return {
+                  id: s.id,
+                  name: `${s.firstName} ${s.lastName}`.trim(),
+                  className: cr?.name ?? "—",
+                  admissionNumber: s.admissionNumber,
+                };
+              }),
+            }
+          : {}),
       });
     } catch (err) {
       console.error(err);

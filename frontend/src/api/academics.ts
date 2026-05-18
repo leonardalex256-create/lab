@@ -10,7 +10,13 @@ export type ResultEntryOptions = {
   authority: "full" | "restricted";
   terms: string[];
   examTypes: string[];
-  classes: Array<{ id: number; name: string; categoryId: number | null; categoryName: string | null }>;
+  classes: Array<{
+    id: number;
+    name: string;
+    categoryId: number | null;
+    categoryName: string | null;
+    studentCount?: number;
+  }>;
   sections: Array<{ id: number; classRoomId: number; name: string }>;
 };
 
@@ -70,6 +76,7 @@ export type SubjectAssignmentConfigRow = {
   classCategoryId: number;
   sectionName: string | null;
   subjectName: string;
+  shortForm?: string | null;
 };
 
 export type SubjectConfigPayload = {
@@ -93,9 +100,33 @@ export async function createSubjectConfig(body: {
   classCategoryId: number;
   sectionName?: string;
   subjectName: string;
+  shortForm: string;
 }): Promise<SubjectAssignmentConfigRow> {
   const res = await fetch(apiUrl("/api/me/academics/config/subjects"), {
     method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new Error("Unauthorized");
+  if (!res.ok) {
+    const err = await readJson<{ error?: string }>(res).catch(() => null);
+    throw new Error(err?.error ?? "Request failed");
+  }
+  const data = await readJson<{ item: SubjectAssignmentConfigRow }>(res);
+  return data.item;
+}
+
+export async function updateSubjectConfig(
+  id: number,
+  body: {
+    classCategoryId: number;
+    sectionName?: string;
+    subjectName: string;
+    shortForm: string;
+  },
+): Promise<SubjectAssignmentConfigRow> {
+  const res = await fetch(apiUrl(`/api/me/academics/config/subjects/${id}`), {
+    method: "PATCH",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
@@ -120,6 +151,19 @@ export async function deleteSubjectConfig(id: number): Promise<void> {
   }
 }
 
+export async function fetchSubjectAssignmentUsage(id: number): Promise<{ marksCount: number; examsCount: number }> {
+  const res = await fetch(apiUrl(`/api/me/academics/config/subjects/${id}/usage`), {
+    headers: { ...authHeaders() },
+  });
+  if (res.status === 401) throw new Error("Unauthorized");
+  if (!res.ok) {
+    const err = await readJson<{ error?: string }>(res).catch(() => null);
+    throw new Error(err?.error ?? "Request failed");
+  }
+  const data = await readJson<{ marksCount: number; examsCount: number }>(res);
+  return { marksCount: Number(data.marksCount) || 0, examsCount: Number(data.examsCount) || 0 };
+}
+
 export async function fetchResultEntryOptions(): Promise<ResultEntryOptions> {
   const res = await fetch(apiUrl("/api/me/academics/result-entry/options"), {
     headers: { ...authHeaders() },
@@ -133,16 +177,22 @@ export async function fetchResultEntryOptions(): Promise<ResultEntryOptions> {
 }
 
 export type PerformanceSummaryRow = {
+  classRoomId: number;
   className: string;
   sectionName: string;
   totalStudents: number;
   resultsEntered: number;
   avgScore: number | null;
   passRate: number | null;
+  topScore: number | null;
 };
 
-export async function fetchPerformanceSummary(term: string, examType: string): Promise<PerformanceSummaryRow[]> {
-  const q = new URLSearchParams({ term, examType });
+export async function fetchPerformanceSummary(
+  term: string,
+  examType: string,
+  academicYear: string,
+): Promise<PerformanceSummaryRow[]> {
+  const q = new URLSearchParams({ term, examType, academicYear });
   const res = await fetch(apiUrl(`/api/me/academics/performance-summary?${q.toString()}`), {
     headers: { ...authHeaders() },
   });
@@ -152,7 +202,16 @@ export async function fetchPerformanceSummary(term: string, examType: string): P
     throw new Error(err?.error ?? "Request failed");
   }
   const data = await readJson<{ rows: PerformanceSummaryRow[] }>(res);
-  return data.rows;
+  return (data.rows ?? []).map((r) => ({
+    classRoomId: Number((r as any).classRoomId) || 0,
+    className: String((r as any).className ?? ""),
+    sectionName: String((r as any).sectionName ?? ""),
+    totalStudents: Number((r as any).totalStudents) || 0,
+    resultsEntered: Number((r as any).resultsEntered) || 0,
+    avgScore: (r as any).avgScore == null ? null : Number((r as any).avgScore),
+    passRate: (r as any).passRate == null ? null : Number((r as any).passRate),
+    topScore: (r as any).topScore == null ? null : Number((r as any).topScore),
+  }));
 }
 
 export type ResultEntryStudentRow = {
@@ -168,12 +227,14 @@ export async function fetchResultEntryStudents(params: {
   term: string;
   examType: string;
   classRoomId: number;
+  academicYear: string;
   sectionName?: string;
 }): Promise<ResultEntryStudentRow[]> {
   const q = new URLSearchParams({
     term: params.term,
     examType: params.examType,
     classRoomId: String(params.classRoomId),
+    academicYear: params.academicYear,
   });
   if (params.sectionName?.trim()) q.set("sectionName", params.sectionName.trim());
   const res = await fetch(apiUrl(`/api/me/academics/result-entry/students?${q.toString()}`), {
@@ -193,6 +254,8 @@ export type GeneratedMarksheetRow = {
   admissionNumber: string;
   fullName: string;
   sectionName: string | null;
+  gender?: string | null;
+  hasPassportPhoto?: boolean;
   marksBySubject: Record<string, number | null>;
   totalMarks: number;
   position: number;
@@ -204,8 +267,11 @@ export type GeneratedMarksheetPayload = {
   categoryId: number | null;
   categoryName: string | null;
   term: string;
+  academicYear?: string;
   examType: string;
   subjects: string[];
+  subjectsMeta?: Array<{ name: string; shortForm: string | null }>;
+  hasMissingSubjectShortForms?: boolean;
   rows: GeneratedMarksheetRow[];
 };
 
@@ -213,11 +279,13 @@ export async function generateClassMarksheet(params: {
   term: string;
   examType: string;
   classRoomId: number;
+  academicYear: string;
 }): Promise<GeneratedMarksheetPayload> {
   const q = new URLSearchParams({
     term: params.term,
     examType: params.examType,
     classRoomId: String(params.classRoomId),
+    academicYear: params.academicYear,
   });
   const res = await fetch(apiUrl(`/api/me/academics/result-entry/marksheet?${q.toString()}`), {
     headers: { ...authHeaders() },
@@ -244,11 +312,13 @@ export type PendingResultEntryStudentRow = {
 export async function fetchPendingResultEntryStudents(params: {
   term: string;
   examType: string;
+  academicYear: string;
   includeSaved?: boolean;
 }): Promise<PendingResultEntryStudentRow[]> {
   const q = new URLSearchParams({
     term: params.term,
     examType: params.examType,
+    academicYear: params.academicYear,
   });
   if (params.includeSaved) q.set("includeSaved", "true");
   const res = await fetch(apiUrl(`/api/me/academics/result-entry/pending-students?${q.toString()}`), {
@@ -276,6 +346,7 @@ export type StudentMarkEntryPayload = {
   className: string;
   sectionName: string | null;
   term: string;
+  academicYear?: string;
   examType: string;
   subjects: StudentSubjectMarkRow[];
 };
@@ -284,10 +355,12 @@ export async function fetchStudentMarkEntry(params: {
   studentId: number;
   term: string;
   examType: string;
+  academicYear: string;
 }): Promise<StudentMarkEntryPayload> {
   const q = new URLSearchParams({
     term: params.term,
     examType: params.examType,
+    academicYear: params.academicYear,
   });
   const res = await fetch(
     apiUrl(`/api/me/academics/result-entry/student/${params.studentId}?${q.toString()}`),
@@ -306,6 +379,7 @@ export async function saveStudentMarkEntry(body: {
   studentId: number;
   term: string;
   examType: string;
+  academicYear?: string;
   marks: Array<{ subject: string; score: number }>;
 }): Promise<{ ok: boolean; saved: number }> {
   const res = await fetch(apiUrl(`/api/me/academics/result-entry/student/${body.studentId}/marks`), {
@@ -314,6 +388,7 @@ export async function saveStudentMarkEntry(body: {
     body: JSON.stringify({
       term: body.term,
       examType: body.examType,
+      academicYear: body.academicYear,
       marks: body.marks,
     }),
   });
@@ -352,8 +427,12 @@ export type ExamPerformanceSummaryRow = {
   avgScore: string;
 };
 
-export async function fetchExamsPerformanceSummary(term: string): Promise<ExamPerformanceSummaryRow[]> {
-  const res = await fetch(apiUrl(`/api/me/exams/performance-summary?term=${term}`), {
+export async function fetchExamsPerformanceSummary(
+  term: string,
+  academicYear: string,
+): Promise<ExamPerformanceSummaryRow[]> {
+  const q = new URLSearchParams({ term, academicYear });
+  const res = await fetch(apiUrl(`/api/me/exams/performance-summary?${q.toString()}`), {
     headers: { ...authHeaders() },
   });
   if (res.status === 401) throw new Error("Unauthorized");
@@ -438,6 +517,23 @@ export async function fetchExams(classRoomId?: number): Promise<UpcomingExamRow[
     headers: { ...authHeaders() },
   });
   return readJson<{ items: UpcomingExamRow[] }>(res).then(d => d.items);
+}
+
+export async function fetchAssessmentExamTypesForPeriod(params: {
+  term: string;
+  academicYear: string;
+}): Promise<string[]> {
+  const q = new URLSearchParams({ term: params.term, academicYear: params.academicYear });
+  const res = await fetch(apiUrl(`/api/me/academics/historical/assessment-exam-types?${q.toString()}`), {
+    headers: { ...authHeaders() },
+  });
+  if (res.status === 401) throw new Error("Unauthorized");
+  if (!res.ok) {
+    const err = await readJson<{ error?: string }>(res).catch(() => null);
+    throw new Error(err?.error ?? "Request failed");
+  }
+  const data = await readJson<{ examTypes: string[] }>(res);
+  return (data.examTypes ?? []).map((x) => String(x).trim()).filter(Boolean);
 }
 
 export async function createExam(body: any): Promise<UpcomingExamRow> {

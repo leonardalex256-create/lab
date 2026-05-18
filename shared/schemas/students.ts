@@ -7,19 +7,28 @@ import {
   ugandanPhoneOptional,
 } from "./common.js";
 
-export const studentSortBySchema = z.enum(["date", "id", "name", "class"]);
+export const studentSortBySchema = z.enum(["date", "id", "name", "class", "boarding"]);
 export const studentSortDirSchema = z.enum(["asc", "desc"]);
+
+const studentListBoardingFilterSchema = z.enum(["boarding", "day_half", "day_full"]);
 
 export const studentListQuerySchema = z.object({
   q: optionalTrimmed(200),
   sortBy: studentSortBySchema.default("date"),
   sortDir: studentSortDirSchema.default("desc"),
+  classRoomId: optionalPositiveInt(),
+  boardingStatus: z.preprocess((value: unknown) => {
+    if (value === undefined || value === null || value === "") return undefined;
+    if (typeof value !== "string") return value;
+    const v = value.trim().toLowerCase();
+    return v.length > 0 ? v : undefined;
+  }, studentListBoardingFilterSchema.optional()),
   limit: z.preprocess((value: unknown) => {
-    if (value === undefined || value === null || value === "") return 100;
+    if (value === undefined || value === null || value === "") return 50;
     const n = typeof value === "number" ? value : Number(value);
-    if (!Number.isFinite(n)) return 100;
-    return Math.min(500, Math.max(1, Math.floor(n)));
-  }, z.number().int().min(1).max(500)),
+    if (!Number.isFinite(n)) return 50;
+    return Math.min(200, Math.max(1, Math.floor(n)));
+  }, z.number().int().min(1).max(200)),
   offset: z.preprocess((value: unknown) => {
     if (value === undefined || value === null || value === "") return 0;
     const n = typeof value === "number" ? value : Number(value);

@@ -4,6 +4,9 @@ import { LoginPage } from "./LoginPage";
 import { RegisterPage, type RegisterPayload } from "./RegisterPage";
 import { PasswordResetPage } from "./PasswordResetPage";
 import { Dashboard } from "./dashboards/Dashboard";
+import { clearTermContextStorage } from "./context/termContextStorage";
+import { TermProvider } from "./context/TermContext";
+import { SchoolConfigProvider } from "./context/SchoolConfigContext";
 import "./App.css";
 
 const REMEMBER_KEY = "junior_school_remembered_email";
@@ -13,9 +16,11 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 type MeResponse = {
   user: {
     sub: string;
+    name?: string;
     role: string;
     email: string;
     twoFactorEnabled?: boolean;
+    permissions?: string[];
   };
 };
 
@@ -295,6 +300,7 @@ export default function App() {
   }, []);
 
   const logout = useCallback(() => {
+    clearTermContextStorage(profile?.user?.sub);
     localStorage.removeItem("token");
     setToken(null);
     setProfile(null);
@@ -302,7 +308,7 @@ export default function App() {
     setError(null);
     setPassword("");
     setPending2FA(null);
-  }, []);
+  }, [profile?.user?.sub]);
 
   const register = useCallback(async (payload: RegisterPayload) => {
     setError(null);
@@ -431,13 +437,17 @@ export default function App() {
   }
 
   return (
-    <Dashboard
-      user={profile?.user ?? null}
-      profileLoading={profileLoading}
-      profileError={profileError}
-      onRetryProfile={refreshProfile}
-      onLogout={logout}
-      onAccountUpdated={refreshProfile}
-    />
+    <SchoolConfigProvider>
+      <TermProvider userSub={profile?.user?.sub ?? null} userRole={profile?.user?.role ?? null}>
+        <Dashboard
+          user={profile?.user ?? null}
+          profileLoading={profileLoading}
+          profileError={profileError}
+          onRetryProfile={refreshProfile}
+          onLogout={logout}
+          onAccountUpdated={refreshProfile}
+        />
+      </TermProvider>
+    </SchoolConfigProvider>
   );
 }

@@ -4,7 +4,9 @@ export type StudentPaymentReceipt = {
   id: number;
   receiptNo: string;
   issuedAt: Date;
+  generatedByName?: string;
   term: string;
+  academicYear?: string;
   paymentMethod: string;
   paidBy: string;
   amountPaid: number;
@@ -99,6 +101,7 @@ export type FinanceReportRow = {
 export type StudentStatementPayload = {
   student: StudentApiRow;
   term: string;
+  academicYear?: string;
   assignedAmount: number;
   totalPaid: number;
   outstandingAmount: number;
@@ -126,6 +129,7 @@ export type DebtorRow = {
 
 export type DebtorsPayload = {
   term: string;
+  academicYear?: string;
   totalOutstanding: number;
   items: DebtorRow[];
 };

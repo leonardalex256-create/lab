@@ -7,6 +7,8 @@ import {
   type StudentSortBy,
   type StudentSortDir,
 } from "../../api/students";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 import { useI18n } from "../../i18n/I18nProvider";
 import { exportStudentsToXlsx } from "../../utils/exportStudentsXlsx";
 import { AuthenticatedStudentPhoto } from "./AuthenticatedStudentPhoto";
@@ -25,6 +27,8 @@ type StudentsListPanelProps = {
   classNameFilter?: string | null;
   /** Directory pages: export + row actions */
   showDirectoryTools?: boolean;
+  /** User permissions array — when provided, gates edit/delete/export. Admin roles should pass undefined to allow all. */
+  permissions?: string[];
 };
 
 type StudentSortOption = StudentSortBy | "custom";
@@ -35,6 +39,7 @@ type CustomSortColumn =
   | "sectionName"
   | "boardingStatus"
   | "admittedAt";
+type ExportFormat = "excel" | "pdf";
 
 function formatStudentStatus(status: string | null): string {
   if (!status) return "—";
@@ -134,14 +139,21 @@ export function StudentsListPanel({
   refreshKey = 0,
   classNameFilter = null,
   showDirectoryTools = false,
+  permissions,
 }: StudentsListPanelProps) {
   const { t } = useI18n();
+  // Permission helpers — undefined means "all allowed" (admin)
+  const canView = !permissions || permissions.includes("students_view") || permissions.includes("students_all");
+  const canEdit = !permissions || permissions.includes("students_edit");
+  const canDelete = !permissions || permissions.includes("students_delete");
+  const canExport = !permissions || permissions.includes("students_export");
   const [draft, setDraft] = useState("");
   const [applied, setApplied] = useState("");
   const [sortBy, setSortBy] = useState<StudentSortOption>("date");
   const [sortDir, setSortDir] = useState<StudentSortDir>("desc");
   const [customSortColumn, setCustomSortColumn] = useState<CustomSortColumn>("fullName");
   const [customSortValue, setCustomSortValue] = useState("");
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("excel");
   const [items, setItems] = useState<StudentApiRow[]>([]);
   const [totalItems, setTotalItems] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -237,19 +249,61 @@ export function StudentsListPanel({
 
   const handleExport = () => {
     const stamp = new Date().toISOString().slice(0, 10);
-    exportStudentsToXlsx(items, `students-${stamp}`, {
-      admission: t("students.col.admission"),
-      name: t("students.col.name"),
-      class: t("students.col.class"),
-      section: t("students.col.section"),
-      dob: t("students.col.dob"),
-      admitted: t("students.col.admitted"),
-      nationality: t("students.col.nationality"),
-      country: t("students.col.country"),
-      district: t("students.col.district"),
-      registrationType: t("students.col.registrationType"),
+    if (exportFormat === "excel") {
+      exportStudentsToXlsx(displayedItems, `students-${stamp}`, {
+        admission: t("students.col.admission"),
+        name: t("students.col.name"),
+        class: t("students.col.class"),
+        section: t("students.col.section"),
+        dob: t("students.col.dob"),
+        admitted: t("students.col.admitted"),
+        nationality: t("students.col.nationality"),
+        country: t("students.col.country"),
+        district: t("students.col.district"),
+        registrationType: t("students.col.registrationType"),
+      });
+      return;
+    }
+
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+    const generatedAt = new Date().toLocaleString();
+    const q = (applied || draft).trim();
+    doc.setFontSize(14);
+    doc.text(title || "Students List", 40, 36);
+    doc.setFontSize(10);
+    doc.text(`Generated: ${generatedAt}`, 40, 54);
+    if (q) {
+      doc.text(`Filter: ${q}`, 40, 68);
+    }
+    autoTable(doc, {
+      startY: q ? 80 : 66,
+      head: [[
+        t("students.col.admission"),
+        t("students.col.name"),
+        t("students.col.class"),
+        t("students.col.section"),
+        t("students.col.status"),
+        t("students.col.dob"),
+        t("students.col.admitted"),
+      ]],
+      body: displayedItems.map((row) => [
+        row.admissionNumber,
+        row.fullName,
+        row.className ?? "—",
+        row.sectionName ?? "—",
+        formatStudentStatus(row.boardingStatus),
+        row.dateOfBirthFormatted ?? "—",
+        row.admittedAt,
+      ]),
+      styles: { fontSize: 9, cellPadding: 5 },
+      headStyles: { fillColor: [79, 70, 229], textColor: 255 },
     });
+    doc.save(`students-${stamp}.pdf`);
   };
+
+  const exportDisabled = loading || displayedItems.length === 0;
+
+  const exportLabel = exportFormat === "excel" ? t("students.exportExcel") : "Export PDF";
 
   const queueDelete = (row: StudentApiRow) => {
     if (deleteTimerRef.current != null) {
@@ -457,18 +511,29 @@ export function StudentsListPanel({
                 >
                   {t("dashboard.search")}
                 </button>
-                {showDirectoryTools ? (
-                  <button
-                    type="button"
-                    onClick={handleExport}
-                    disabled={loading || items.length === 0}
-                    className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-5 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-indigo-600 focus:ring-4 focus:ring-slate-200 disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
-                  >
-                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    {t("students.exportExcel")}
-                  </button>
+                {canExport ? (
+                  <>
+                    <select
+                      value={exportFormat}
+                      onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+                      className={selectClass}
+                      aria-label="Select export format"
+                    >
+                      <option value="excel">Excel</option>
+                      <option value="pdf">PDF</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleExport}
+                      disabled={exportDisabled}
+                      className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-5 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-indigo-600 focus:ring-4 focus:ring-slate-200 disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      {exportLabel}
+                    </button>
+                  </>
                 ) : null}
               </div>
             </div>
@@ -565,6 +630,7 @@ export function StudentsListPanel({
                   {showDirectoryTools && (
                     <td className="px-1 py-3 sm:px-4">
                       <div className="flex items-center justify-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+                        {canView && (
                         <button
                           type="button"
                           className={iconBtn}
@@ -574,6 +640,8 @@ export function StudentsListPanel({
                         >
                           <IconView />
                         </button>
+                        )}
+                        {canEdit && (
                         <button
                           type="button"
                           className={iconBtn}
@@ -583,6 +651,8 @@ export function StudentsListPanel({
                         >
                           <IconEdit />
                         </button>
+                        )}
+                        {canDelete && (
                         <button
                           type="button"
                           className={`${iconBtn} hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600`}
@@ -592,6 +662,7 @@ export function StudentsListPanel({
                         >
                           <IconTrash />
                         </button>
+                        )}
                       </div>
                     </td>
                   )}
@@ -682,6 +753,7 @@ export function StudentsListPanel({
               </div>
             </div>
             <div className="mt-6 flex flex-wrap gap-3 border-t border-slate-100 pt-6">
+              {canEdit && (
               <button
                 type="button"
                 onClick={() => {
@@ -693,6 +765,8 @@ export function StudentsListPanel({
                 <IconEdit className="h-4 w-4" />
                 Edit Student Profile
               </button>
+              )}
+              {canDelete && (
               <button
                 type="button"
                 onClick={() => setConfirmDeleteRow(profileCard)}
@@ -701,6 +775,7 @@ export function StudentsListPanel({
                 <IconTrash className="h-4 w-4" />
                 Delete Record
               </button>
+              )}
             </div>
           </div>
         </section>

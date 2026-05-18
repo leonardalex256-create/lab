@@ -14,7 +14,11 @@ import {
   type ClassSectionOption,
 } from "../../api/students";
 import { fetchGeneralSettings } from "../../api/settingsGeneral";
+import { fetchFeeStructure, type FeeStructureRow } from "../../api/financeFeeStructure";
+import { assignStudentFee } from "../../api/financeStatements";
+import { formatCurrencyUGX } from "../finance/shared/financeFormat";
 import { useI18n } from "../../i18n/I18nProvider";
+import { useTermContext } from "../../context/TermContext";
 
 type NewAdmissionFormProps = {
   onCreated: () => void;
@@ -37,6 +41,7 @@ const religions = [
 
 export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
   const { t } = useI18n();
+  const { systemTerm, status: termCtxStatus } = useTermContext();
   const [rooms, setRooms] = useState<ClassRoomOption[]>([]);
   const [loadRoomsError, setLoadRoomsError] = useState<string | null>(null);
   const [nationalities, setNationalities] = useState<string[]>([]);
@@ -74,11 +79,20 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
   >("");
   const [residenceAddress, setResidenceAddress] = useState("");
   const [medicalInfo, setMedicalInfo] = useState("");
+  const [moreInformation, setMoreInformation] = useState("");
   const [emergencyContactName, setEmergencyContactName] = useState("");
   const [emergencyContactPhone, setEmergencyContactPhone] = useState("");
   const [guardianName, setGuardianName] = useState("");
   const [guardianPhone, setGuardianPhone] = useState("");
   const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [selectedTerm, setSelectedTerm] = useState("Term 1");
+  const [feeRows, setFeeRows] = useState<FeeStructureRow[]>([]);
+  const [selectedFeeStatus, setSelectedFeeStatus] = useState("");
+  const [feeAssignmentNotes, setFeeAssignmentNotes] = useState("");
+  const [feeLoading, setFeeLoading] = useState(false);
+  const [feeLoadError, setFeeLoadError] = useState<string | null>(null);
+  const [assignFeeEnabled, setAssignFeeEnabled] = useState(true);
+  const [feeSuggestionNote, setFeeSuggestionNote] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
@@ -98,6 +112,10 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
     if (!Number.isFinite(id) || id <= 0) return null;
     return rooms.find((room) => room.id === id) ?? null;
   }, [classRoomId, rooms]);
+  const selectedFeeRow = useMemo(
+    () => feeRows.find((row) => row.status === selectedFeeStatus) ?? null,
+    [feeRows, selectedFeeStatus],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -113,6 +131,11 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load once
   }, []);
+
+  useEffect(() => {
+    if (termCtxStatus !== "ready") return;
+    setSelectedTerm(systemTerm);
+  }, [termCtxStatus, systemTerm]);
 
   useEffect(() => {
     let cancelled = false;
@@ -230,6 +253,75 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
     };
   }, [classRoomId, sectionsStreamsEnabled]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setFeeLoading(true);
+    void fetchFeeStructure(selectedTerm)
+      .then((rows) => {
+        if (cancelled) return;
+        setFeeRows(rows);
+        setFeeLoadError(null);
+        setSelectedFeeStatus((prev) => {
+          if (prev && rows.some((row) => row.status === prev)) return prev;
+          return rows[0]?.status ?? "";
+        });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setFeeRows([]);
+          setSelectedFeeStatus("");
+          setFeeLoadError(err instanceof Error ? err.message : "Failed to load fee structures.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setFeeLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTerm]);
+
+  useEffect(() => {
+    if (feeRows.length === 0) {
+      setFeeSuggestionNote(null);
+      return;
+    }
+    const normalized = boardingStatus.toLowerCase();
+    const candidates: string[] = [];
+    if (normalized === "boarding") candidates.push("boarding");
+    if (normalized === "day_full") candidates.push("day_full");
+    if (normalized === "day_half") candidates.push("day_half");
+
+    const matchedByStatus = candidates
+      .map((key) => feeRows.find((row) => row.status === key))
+      .find((row): row is FeeStructureRow => Boolean(row));
+
+    if (matchedByStatus) {
+      setSelectedFeeStatus(matchedByStatus.status);
+      setFeeSuggestionNote(`Suggested from boarding status "${boardingStatus}".`);
+      return;
+    }
+
+    const labelHint =
+      normalized === "boarding"
+        ? "boarding"
+        : normalized === "day_half"
+          ? "half"
+          : normalized === "day_full"
+            ? "full"
+            : "";
+    const matchedByLabel = labelHint
+      ? feeRows.find((row) => row.label.toLowerCase().includes(labelHint))
+      : null;
+    if (matchedByLabel) {
+      setSelectedFeeStatus(matchedByLabel.status);
+      setFeeSuggestionNote(`Suggested from boarding status "${boardingStatus}".`);
+      return;
+    }
+
+    setFeeSuggestionNote("No exact match found. You can choose a fee structure manually.");
+  }, [boardingStatus, feeRows]);
+
   const resetForm = () => {
     setFirstName("");
     setMiddleName("");
@@ -256,11 +348,19 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
     setBoardingStatus("");
     setResidenceAddress("");
     setMedicalInfo("");
+    setMoreInformation("");
     setEmergencyContactName("");
     setEmergencyContactPhone("");
     setGuardianName("");
     setGuardianPhone("");
     setPhotoFile(null);
+    setFeeAssignmentNotes("");
+    setAssignFeeEnabled(true);
+    setFeeSuggestionNote(null);
+    setSelectedFeeStatus((prev) => {
+      if (prev && feeRows.some((row) => row.status === prev)) return prev;
+      return feeRows[0]?.status ?? "";
+    });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -323,12 +423,34 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
         guardianPhone: guardianPhone.trim() || undefined,
       });
 
+      let feeAssignmentMessage = "";
+      if (assignFeeEnabled && selectedFeeRow && selectedFeeRow.amountDueUgx > 0) {
+        try {
+          const notesPayload = [
+            `Fee type: ${selectedFeeRow.label}`,
+            selectedFeeRow.notes ? `Structure note: ${selectedFeeRow.notes}` : "",
+            feeAssignmentNotes.trim(),
+          ]
+            .filter(Boolean)
+            .join(" | ");
+          await assignStudentFee({
+            studentId: created.id,
+            term: selectedTerm,
+            amountDueUgx: Math.max(Number(selectedFeeRow.amountDueUgx) || 0, 0),
+            notes: notesPayload || undefined,
+          });
+          feeAssignmentMessage = ` Fee assigned: ${selectedFeeRow.label} (${formatCurrencyUGX(selectedFeeRow.amountDueUgx)}) for ${selectedTerm}.`;
+        } catch (feeErr) {
+          feeAssignmentMessage = ` Student created, but fee assignment failed: ${feeErr instanceof Error ? feeErr.message : "Unknown error."}`;
+        }
+      }
+
       if (photoFile) {
         try {
           await uploadStudentPhoto(created.id, photoFile);
         } catch {
           setFormSuccess(
-            `${t("students.form.success")} ${t("students.photo.uploadLaterHint")}`,
+            `${t("students.form.success")} ${t("students.photo.uploadLaterHint")}${feeAssignmentMessage}`,
           );
           resetForm();
           onCreated();
@@ -336,7 +458,7 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
         }
       }
       setFormSuccess(
-        `${t("students.form.success")} (${t("students.form.admissionNumberLabel")}: ${created.admissionNumber})`,
+        `${t("students.form.success")} (${t("students.form.admissionNumberLabel")}: ${created.admissionNumber}).${feeAssignmentMessage}`,
       );
       resetForm();
       onCreated();
@@ -444,6 +566,90 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
                 {districts.map((d) => (<option key={d} value={d}>{d}</option>))}
               </select>
             </label>
+          </div>
+        </div>
+
+        {/* Section 6: Fees Assignment */}
+        <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm transition-shadow hover:shadow-md">
+          <div className="border-b border-slate-100 bg-slate-50/50 px-8 py-5">
+            <h3 className="flex items-center gap-3 text-lg font-bold text-slate-800">
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-100 text-sm font-bold text-amber-700">6</span>
+              Student Fees Assignment
+            </h3>
+          </div>
+          <div className="grid gap-x-6 gap-y-6 p-8 sm:grid-cols-2 lg:grid-cols-3">
+            <label className="col-span-full flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <input
+                type="checkbox"
+                checked={assignFeeEnabled}
+                onChange={(e) => setAssignFeeEnabled(e.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              <span className="text-sm font-semibold text-slate-700">
+                Assign fee structure to this student during admission
+              </span>
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-semibold text-slate-600">Term</span>
+              <select
+                value={selectedTerm}
+                onChange={(e) => setSelectedTerm(e.target.value)}
+                className={fieldClass}
+                disabled={!assignFeeEnabled}
+              >
+                <option value="Term 1">Term 1</option>
+                <option value="Term 2">Term 2</option>
+                <option value="Term 3">Term 3</option>
+              </select>
+            </label>
+            <label className="block sm:col-span-2">
+              <span className="mb-1.5 block text-xs font-semibold text-slate-600">Fee Structure</span>
+              <select
+                value={selectedFeeStatus}
+                onChange={(e) => setSelectedFeeStatus(e.target.value)}
+                className={fieldClass}
+                disabled={!assignFeeEnabled || feeLoading || feeRows.length === 0}
+              >
+                <option value="">
+                  {feeLoading ? "Loading fee structures..." : feeRows.length === 0 ? "No fee structures available" : "Select fee structure"}
+                </option>
+                {feeRows.map((row) => (
+                  <option key={row.status} value={row.status}>
+                    {row.label} - {formatCurrencyUGX(row.amountDueUgx)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {feeSuggestionNote ? (
+              <div className="col-span-full rounded-xl border border-indigo-100 bg-indigo-50 px-4 py-3 text-xs font-medium text-indigo-700">
+                {feeSuggestionNote}
+              </div>
+            ) : null}
+            {feeLoadError ? (
+              <div className="col-span-full rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
+                {feeLoadError}
+              </div>
+            ) : null}
+            <label className="block col-span-full">
+              <span className="mb-1.5 block text-xs font-semibold text-slate-600">Fee Assignment Notes (Optional)</span>
+              <textarea
+                value={feeAssignmentNotes}
+                onChange={(e) => setFeeAssignmentNotes(e.target.value)}
+                disabled={!assignFeeEnabled}
+                className={`${fieldClass} min-h-[84px] resize-none`}
+                placeholder="Optional note for this student's fee assignment."
+              />
+            </label>
+            {selectedFeeRow ? (
+              <div className="col-span-full rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
+                <p className="font-semibold text-slate-700">
+                  Selected amount: <span className="font-bold text-slate-900">{formatCurrencyUGX(selectedFeeRow.amountDueUgx)}</span>
+                </p>
+                {selectedFeeRow.notes ? (
+                  <p className="mt-1 text-xs text-slate-500">Structure note: {selectedFeeRow.notes}</p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -643,6 +849,10 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
               <span className="block text-xs font-semibold text-slate-600 mb-1.5">{t("students.form.medicalInfo")}</span>
               <textarea value={medicalInfo} onChange={(e) => setMedicalInfo(e.target.value)} className={`${fieldClass} min-h-[96px] resize-none`} placeholder={t("students.form.medicalInfoPlaceholder")} />
             </label>
+            <label className="block col-span-full lg:col-span-1">
+              <span className="block text-xs font-semibold text-slate-600 mb-1.5">More Information</span>
+              <textarea required value={moreInformation} onChange={(e) => setMoreInformation(e.target.value)} className={`${fieldClass} min-h-[96px] resize-none`} placeholder="Any other information about the student / family that you want to share with us. This will not be shared with the student." />
+            </label>
           </div>
         </div>
 
@@ -651,7 +861,7 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
           <div className="border-b border-slate-100 bg-slate-50/50 px-8 py-5">
             <h3 className="flex items-center gap-3 text-lg font-bold text-slate-800">
               <span className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-100 text-sm font-bold text-purple-700">5</span>
-              Student Photograph
+              Student Passport Photo
             </h3>
           </div>
           <div className="p-8">

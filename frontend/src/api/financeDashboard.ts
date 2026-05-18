@@ -7,9 +7,25 @@ async function readJson<T>(res: Response): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-export async function fetchFinanceDashboard(month?: string): Promise<FinanceDashboardPayload> {
+export async function fetchFinanceDashboard(
+  termOrMonth?: string,
+  academicYear?: string,
+  month?: string,
+): Promise<FinanceDashboardPayload> {
   const params = new URLSearchParams();
-  if (month?.trim()) params.set("month", month.trim());
+  // Backwards compatible: previously (month?: YYYY-MM).
+  const inferredMonth =
+    termOrMonth?.trim() && /^\d{4}-\d{2}$/.test(termOrMonth.trim()) ? termOrMonth.trim() : null;
+  const term =
+    termOrMonth?.trim() && termOrMonth.trim().startsWith("Term ") ? termOrMonth.trim() : null;
+
+  if (term) params.set("term", term);
+  if (academicYear?.trim() && /^\d{4}$/.test(academicYear.trim())) {
+    params.set("academicYear", academicYear.trim());
+  }
+
+  const m = month?.trim() && /^\d{4}-\d{2}$/.test(month.trim()) ? month.trim() : inferredMonth;
+  if (m) params.set("month", m);
   const query = params.toString();
   const res = await fetch(apiUrl(`/api/me/finance/dashboard${query ? `?${query}` : ""}`), {
     headers: { ...authHeaders() },

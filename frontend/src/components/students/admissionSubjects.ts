@@ -1,7 +1,7 @@
 /** Default subject list for prior/entry marks. */
 export function subjectsForClassRoom(className: string): string[] {
   void className;
-  return ["English", "Mathematics", "Social Studies", "Science"];
+  return [];
 }
 
 export type AdmissionMarksPayload = {

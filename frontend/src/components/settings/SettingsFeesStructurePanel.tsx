@@ -12,7 +12,6 @@ type RowState = {
   label: string;
   amountDueUgx: string;
   notes: string;
-  isSystem: boolean;
 };
 
 const TERM_OPTIONS = ["Term 1", "Term 2", "Term 3"];
@@ -35,13 +34,22 @@ function toSlug(name: string): string {
   return `custom_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/(^_|_$)/g, "")}`;
 }
 
+/** Internal row key stored as boarding_status — must match for student fee matching (e.g. day_half). */
+function normalizeStatusKeyInput(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 60);
+}
+
 function toRows(items: FeeStructureRow[]): RowState[] {
   return items.map((x) => ({
     status: x.status,
     label: x.label,
     amountDueUgx: String(x.amountDueUgx),
     notes: x.notes ?? "",
-    isSystem: x.isSystem,
   }));
 }
 
@@ -109,6 +117,7 @@ export function SettingsFeesStructurePanel() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState("");
+  const [newStatusKey, setNewStatusKey] = useState("");
   const [newAmount, setNewAmount] = useState("");
   const [dirty, setDirty] = useState(false);
   const originalRef = useRef<string>("");
@@ -154,34 +163,42 @@ export function SettingsFeesStructurePanel() {
     [rows],
   );
 
-  const systemCount = rows.filter((r) => r.isSystem).length;
-  const customCount = rows.filter((r) => !r.isSystem).length;
+  const categoryCount = rows.length;
 
   /* row helpers */
   function updateRow(status: string, patch: Partial<RowState>) {
     setRows((prev) => prev.map((row) => (row.status === status ? { ...row, ...patch } : row)));
   }
 
-  function removeCustomRow(status: string) {
+  function removeFeeRow(status: string) {
     setRows((prev) => prev.filter((r) => r.status !== status));
     setDeletedStatuses((prev) => [...prev, status]);
     setDirty(true);
   }
 
-  function addCustomEntity() {
+  function addFeeCategory() {
     const name = newName.trim();
-    if (!name) return;
-    const slug = toSlug(name);
+    if (!name && !newStatusKey.trim()) {
+      setToast({ message: "Enter a display name or an internal status key.", type: "error" });
+      return;
+    }
+    const slug = newStatusKey.trim() ? normalizeStatusKeyInput(newStatusKey) : toSlug(name);
+    if (!slug) {
+      setToast({ message: "Internal status key is invalid.", type: "error" });
+      return;
+    }
+    const label = name || slug.replace(/_/g, " ");
     if (rows.some((r) => r.status === slug)) {
-      setToast({ message: `"${name}" already exists`, type: "error" });
+      setToast({ message: `A row with status "${slug}" already exists.`, type: "error" });
       return;
     }
     const amount = Number(newAmount) || 0;
     setRows((prev) => [
       ...prev,
-      { status: slug, label: name, amountDueUgx: String(Math.round(amount)), notes: "", isSystem: false },
+      { status: slug, label, amountDueUgx: String(Math.round(amount)), notes: "" },
     ]);
     setNewName("");
+    setNewStatusKey("");
     setNewAmount("");
     setShowAddForm(false);
     setDirty(true);
@@ -247,7 +264,11 @@ export function SettingsFeesStructurePanel() {
                 Fees Structure
               </h1>
               <p className="mt-2 max-w-xl text-sm leading-relaxed text-[#64748b]">
-                Configure term-based fees per student category. Applying will update fee assignments for all matching students automatically.
+                Add fee categories per term (nothing is pre-filled). Use internal keys such as{" "}
+                <code className="rounded bg-slate-100 px-1 font-mono text-xs">day_half</code>,{" "}
+                <code className="rounded bg-slate-100 px-1 font-mono text-xs">day_full</code>,{" "}
+                <code className="rounded bg-slate-100 px-1 font-mono text-xs">day_full_p7</code>, or{" "}
+                <code className="rounded bg-slate-100 px-1 font-mono text-xs">boarding</code> so amounts align with student boarding status.
               </p>
             </div>
 
@@ -271,7 +292,7 @@ export function SettingsFeesStructurePanel() {
           </div>
 
           {/* stats row */}
-          <div className="mt-6 grid gap-3 sm:grid-cols-3">
+          <div className="mt-6 grid gap-3 sm:grid-cols-2">
             <div className="flex items-center gap-3 rounded-2xl bg-gradient-to-br from-[#eff6ff] to-[#dbeafe] p-4 ring-1 ring-[#bfdbfe]/50">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white shadow-sm">
                 <span className="text-lg">💵</span>
@@ -286,17 +307,8 @@ export function SettingsFeesStructurePanel() {
                 <span className="text-lg">🏷️</span>
               </div>
               <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-[#16a34a]">System Categories</p>
-                <p className="text-lg font-black text-[#166534]">{systemCount}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3 rounded-2xl bg-gradient-to-br from-[#faf5ff] to-[#f3e8ff] p-4 ring-1 ring-[#d8b4fe]/50">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white shadow-sm">
-                <span className="text-lg">✨</span>
-              </div>
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-[#9333ea]">Custom Categories</p>
-                <p className="text-lg font-black text-[#581c87]">{customCount}</p>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#16a34a]">Categories</p>
+                <p className="text-lg font-black text-[#166534]">{categoryCount}</p>
               </div>
             </div>
           </div>
@@ -330,31 +342,20 @@ export function SettingsFeesStructurePanel() {
                       </span>
                       <div>
                         <h3 className="text-sm font-bold text-[#1e293b]">{row.label}</h3>
-                        <span
-                          className={`mt-0.5 inline-block rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-                            row.isSystem
-                              ? "bg-[#dbeafe] text-[#1d4ed8]"
-                              : "bg-[#fae8ff] text-[#a21caf]"
-                          }`}
-                        >
-                          {row.isSystem ? "System" : "Custom"}
-                        </span>
+                        <p className="mt-0.5 font-mono text-[10px] font-semibold text-slate-400">{row.status}</p>
                       </div>
                     </div>
 
-                    {/* delete button for custom rows */}
-                    {!row.isSystem && (
-                      <button
-                        type="button"
-                        onClick={() => removeCustomRow(row.status)}
-                        className="flex h-8 w-8 items-center justify-center rounded-xl bg-red-50 text-red-400 opacity-0 ring-1 ring-red-200 transition-all group-hover:opacity-100 hover:bg-red-100 hover:text-red-600"
-                        title="Remove this category"
-                      >
-                        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeFeeRow(row.status)}
+                      className="flex h-8 w-8 items-center justify-center rounded-xl bg-red-50 text-red-400 opacity-0 ring-1 ring-red-200 transition-all group-hover:opacity-100 hover:bg-red-100 hover:text-red-600"
+                      title="Remove this category"
+                    >
+                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
                   </div>
 
                   {/* amount input */}
@@ -402,14 +403,26 @@ export function SettingsFeesStructurePanel() {
               <div className="p-5">
                 <h3 className="mb-4 text-sm font-bold text-[#1e293b]">New Fee Category</h3>
                 <label className="block">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8]">Category Name</span>
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8]">Display name</span>
                   <input
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
-                    placeholder="e.g. Transport, Lunch, Uniform..."
+                    placeholder="e.g. Day Half Day, Boarding..."
                     className="neo-inset-field mt-1 w-full rounded-xl px-4 py-2.5 text-sm font-medium text-[#1e293b] placeholder:text-[#cbd5e1] focus:outline-none focus:ring-2 focus:ring-[#c4b5fd] transition"
                     autoFocus
-                    onKeyDown={(e) => e.key === "Enter" && addCustomEntity()}
+                    onKeyDown={(e) => e.key === "Enter" && addFeeCategory()}
+                  />
+                </label>
+                <label className="mt-3 block">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8]">
+                    Internal status key <span className="font-normal text-slate-400">(optional)</span>
+                  </span>
+                  <input
+                    value={newStatusKey}
+                    onChange={(e) => setNewStatusKey(e.target.value)}
+                    placeholder="e.g. day_half, boarding — leave blank to auto-generate"
+                    className="neo-inset-field mt-1 w-full rounded-xl px-4 py-2.5 font-mono text-sm text-[#1e293b] placeholder:text-[#cbd5e1] focus:outline-none focus:ring-2 focus:ring-[#c4b5fd] transition"
+                    onKeyDown={(e) => e.key === "Enter" && addFeeCategory()}
                   />
                 </label>
                 <label className="mt-3 block">
@@ -422,21 +435,26 @@ export function SettingsFeesStructurePanel() {
                     onChange={(e) => setNewAmount(e.target.value)}
                     placeholder="0"
                     className="neo-inset-field mt-1 w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-[#1e293b] placeholder:text-[#cbd5e1] focus:outline-none focus:ring-2 focus:ring-[#c4b5fd] transition"
-                    onKeyDown={(e) => e.key === "Enter" && addCustomEntity()}
+                    onKeyDown={(e) => e.key === "Enter" && addFeeCategory()}
                   />
                 </label>
                 <div className="mt-4 flex gap-2">
                   <button
                     type="button"
-                    onClick={addCustomEntity}
-                    disabled={!newName.trim()}
+                    onClick={addFeeCategory}
+                    disabled={!newName.trim() && !newStatusKey.trim()}
                     className="flex-1 rounded-xl bg-gradient-to-r from-[#8b5cf6] to-[#7c3aed] px-4 py-2 text-xs font-bold text-white shadow-lg shadow-purple-200 transition hover:shadow-xl hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Add Category
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setShowAddForm(false); setNewName(""); setNewAmount(""); }}
+                    onClick={() => {
+                      setShowAddForm(false);
+                      setNewName("");
+                      setNewStatusKey("");
+                      setNewAmount("");
+                    }}
                     className="rounded-xl bg-[#f1f5f9] px-4 py-2 text-xs font-bold text-[#64748b] ring-1 ring-[#e2e8ef] transition hover:bg-[#e2e8ef]"
                   >
                     Cancel

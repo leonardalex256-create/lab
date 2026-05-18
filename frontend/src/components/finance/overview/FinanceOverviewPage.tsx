@@ -1,10 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { fetchFinanceDashboard } from "../../../api/financeDashboard";
+import { useTermContext } from "../../../context/TermContext";
 import { formatCurrencyUGX } from "../shared/financeFormat";
 import { formatShortAgo } from "../../../utils/formatShortAgo";
 import type { FinanceDashboardPayload } from "../shared/financeTypes";
 
 export function FinanceOverviewPage() {
+  const { viewingAcademicYear, systemAcademicYear } = useTermContext();
+  const financeMonth = useMemo(() => {
+    const y = Number(viewingAcademicYear);
+    const sy = Number(systemAcademicYear);
+    const now = new Date();
+    if (Number.isFinite(y) && Number.isFinite(sy) && y === sy && y === now.getFullYear()) {
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    }
+    if (Number.isFinite(y)) return `${y}-12`;
+    return undefined;
+  }, [viewingAcademicYear, systemAcademicYear]);
+
   const [data, setData] = useState<FinanceDashboardPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -12,7 +25,7 @@ export function FinanceOverviewPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    void fetchFinanceDashboard()
+    void fetchFinanceDashboard(financeMonth)
       .then((next) => {
         if (!cancelled) setData(next);
       })
@@ -25,7 +38,7 @@ export function FinanceOverviewPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [financeMonth]);
 
   if (loading) {
     return (
@@ -210,7 +223,10 @@ export function FinanceOverviewPage() {
               </table>
             </div>
             <footer className="px-6 py-3 bg-slate-50/50 border-t border-slate-100 text-center">
-              <button className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 hover:underline transition">View Full Ledger</button>
+              <button 
+                className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 hover:underline transition"
+                title="Navigate to the complete financial ledger"
+              >View Full Ledger</button>
             </footer>
           </section>
         </div>

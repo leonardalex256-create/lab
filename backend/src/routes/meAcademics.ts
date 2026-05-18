@@ -1,11 +1,12 @@
 import { Router } from "express";
-import { Op } from "sequelize";
+import { Op, fn, col, literal } from "sequelize";
 import {
   AcademicExamType,
   AcademicSubjectAssignment,
   ClassCategory,
   ClassRoom,
   ClassSection,
+  Exam,
   SchoolSetting,
   Student,
   StudentAssessmentResult,
@@ -20,6 +21,7 @@ import {
   passRateThresholdFromScale,
   type GradingBand,
 } from "../lib/grading.js";
+import { loadOfficialSchoolTermYear, resolveReadTermYearFromQuery } from "../lib/officialSchoolTermYear.js";
 
 const TERM_OPTIONS = ["Term 1", "Term 2", "Term 3"] as const;
 
@@ -28,6 +30,16 @@ function trimStr(v: unknown, max: number): string | null {
   const t = v.trim();
   if (!t) return null;
   return t.length > max ? t.slice(0, max) : t;
+}
+
+function normalizeSubjectShortForm(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const raw = v.trim().toUpperCase();
+  if (!raw) return null;
+  if (raw.length < 2 || raw.length > 5) return null;
+  // Allow letters, numbers, and dots (e.g. R.E)
+  if (!/^[A-Z0-9.]+$/.test(raw)) return null;
+  return raw;
 }
 
 function normalizeExamType(v: unknown, allowedExamTypes: string[]): string | null {
@@ -46,6 +58,28 @@ async function activeExamTypeKeys(): Promise<string[]> {
     attributes: ["examKey"],
   });
   return rows.map((row) => row.examKey.trim().toUpperCase()).filter(Boolean);
+}
+
+async function examTypeKeysWithResultsForPeriod(params: {
+  userId: number;
+  term: string;
+  academicYear: string;
+}): Promise<string[]> {
+  const classes = await getAccessibleClassrooms(params.userId);
+  const classIds = classes.map((x) => x.id);
+  if (classIds.length === 0) return [];
+  const rows = await StudentAssessmentResult.findAll({
+    where: {
+      term: params.term,
+      academicYear: params.academicYear,
+      classRoomId: { [Op.in]: classIds },
+    },
+    attributes: [[fn("DISTINCT", col("exam_type")), "examType"]],
+    raw: true,
+  });
+  return rows
+    .map((r) => String((r as { examType?: unknown }).examType ?? "").trim().toUpperCase())
+    .filter(Boolean);
 }
 
 async function loadGradingScale(): Promise<GradingBand[]> {
@@ -203,11 +237,27 @@ export function createMeAcademicsRouter() {
     }
   });
 
+  r.get("/academics/historical/assessment-exam-types", async (req, res) => {
+    try {
+      const userId = req.userId!;
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
+      const examTypes = await examTypeKeysWithResultsForPeriod({ userId, term, academicYear });
+      return res.json({ term, academicYear, examTypes });
+    } catch (err) {
+      console.error(err);
+      return res.status(503).json({ error: "Database unavailable" });
+    }
+  });
+
   r.get("/academics/performance-summary", async (req, res) => {
     try {
       const userId = req.userId!;
-      const term = trimStr(req.query.term, 20) ?? "Term 1";
-      const examTypes = await activeExamTypeKeys();
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
+      const [activeExamTypes, periodExamTypes] = await Promise.all([
+        activeExamTypeKeys(),
+        examTypeKeysWithResultsForPeriod({ userId, term, academicYear }),
+      ]);
+      const examTypes = Array.from(new Set([...activeExamTypes, ...periodExamTypes]));
       const gradingScale = await loadGradingScale();
       const passThreshold = passRateThresholdFromScale(gradingScale);
       if (examTypes.length === 0) {
@@ -218,53 +268,129 @@ export function createMeAcademicsRouter() {
       const classIds = classes.map((x) => x.id);
       if (classIds.length === 0) return res.json({ rows: [] });
 
-      const students = await Student.findAll({
-        where: { classRoomId: { [Op.in]: classIds } },
-        attributes: ["id", "classRoomId", "sectionName"],
-      });
-      const results = await StudentAssessmentResult.findAll({
-        where: { term, examType, classRoomId: { [Op.in]: classIds } },
-        attributes: ["studentId", "classRoomId", "sectionName", "score"],
-      });
+      const [studentCounts, resultStats] = await Promise.all([
+        Student.findAll({
+          where: { classRoomId: { [Op.in]: classIds } },
+          attributes: [
+            "classRoomId",
+            ["section_name", "sectionName"],
+            [fn("COUNT", col("id")), "totalStudents"],
+          ],
+          group: ["classRoomId", "section_name"],
+          raw: true,
+        }),
+        StudentAssessmentResult.findAll({
+          where: { term, academicYear, examType, classRoomId: { [Op.in]: classIds } },
+          attributes: [
+            "classRoomId",
+            ["section_name", "sectionName"],
+            [fn("COUNT", col("id")), "resultsCount"],
+            [fn("SUM", col("score")), "scoreSum"],
+            [
+              fn(
+                "SUM",
+                literal(`CASE WHEN score >= ${Number(passThreshold)} THEN 1 ELSE 0 END`),
+              ),
+              "passCount",
+            ],
+          ],
+          group: ["classRoomId", "section_name"],
+          raw: true,
+        }),
+      ]);
+
+      const sequelize = StudentAssessmentResult.sequelize;
+      if (!sequelize) {
+        return res.status(500).json({ error: "Database not initialized" });
+      }
+
+      const topScoreRows = await sequelize.query(
+        `
+          SELECT
+            sar.class_room_id AS classRoomId,
+            sar.section_name AS sectionName,
+            MAX(sarTotals.totalScore) AS topScore
+          FROM (
+            SELECT
+              class_room_id,
+              section_name,
+              student_id,
+              SUM(score) AS totalScore
+            FROM student_assessment_results
+            WHERE term = :term
+              AND academic_year = :academicYear
+              AND exam_type = :examType
+              AND class_room_id IN (:classIds)
+            GROUP BY class_room_id, section_name, student_id
+          ) AS sarTotals
+          JOIN student_assessment_results sar
+            ON sar.class_room_id = sarTotals.class_room_id
+            AND sar.section_name = sarTotals.section_name
+            AND sar.student_id = sarTotals.student_id
+            AND sar.term = :term
+            AND sar.academic_year = :academicYear
+            AND sar.exam_type = :examType
+          GROUP BY sar.class_room_id, sar.section_name
+        `,
+        {
+          replacements: { term, academicYear, examType, classIds },
+          type: "SELECT",
+        } as any,
+      );
 
       const classNameById = new Map(classes.map((x) => [x.id, x.name]));
       const studentCountMap = new Map<string, number>();
-      for (const stu of students) {
-        const className = classNameById.get(stu.classRoomId ?? 0) ?? "Unassigned";
-        const sectionName = (stu.sectionName ?? "").trim() || "General";
-        const k = `${stu.classRoomId ?? 0}::${className}::${sectionName}`;
-        studentCountMap.set(k, (studentCountMap.get(k) ?? 0) + 1);
+      for (const row of studentCounts) {
+        const classRoomId = Number((row as { classRoomId?: unknown }).classRoomId ?? 0) || 0;
+        const className = classNameById.get(classRoomId) ?? "Unassigned";
+        const sectionName = String((row as { sectionName?: unknown }).sectionName ?? "General").trim() || "General";
+        const totalStudents = Number((row as { totalStudents?: unknown }).totalStudents ?? 0) || 0;
+        const k = `${classRoomId}::${className}::${sectionName}`;
+        studentCountMap.set(k, totalStudents);
       }
 
       const resultsMap = new Map<string, { count: number; sum: number; pass: number }>();
-      for (const row of results) {
-        const className = classNameById.get(row.classRoomId ?? 0) ?? "Unassigned";
-        const sectionName = (row.sectionName ?? "").trim() || "General";
-        const k = `${row.classRoomId ?? 0}::${className}::${sectionName}`;
-        const prev = resultsMap.get(k) ?? { count: 0, sum: 0, pass: 0 };
-        const score = Number(row.score) || 0;
-        prev.count += 1;
-        prev.sum += score;
-        if (score >= passThreshold) prev.pass += 1;
-        resultsMap.set(k, prev);
+      for (const row of resultStats) {
+        const classRoomId = Number((row as { classRoomId?: unknown }).classRoomId ?? 0) || 0;
+        const className = classNameById.get(classRoomId) ?? "Unassigned";
+        const sectionName = String((row as { sectionName?: unknown }).sectionName ?? "General").trim() || "General";
+        const k = `${classRoomId}::${className}::${sectionName}`;
+        resultsMap.set(k, {
+          count: Number((row as { resultsCount?: unknown }).resultsCount ?? 0) || 0,
+          sum: Number((row as { scoreSum?: unknown }).scoreSum ?? 0) || 0,
+          pass: Number((row as { passCount?: unknown }).passCount ?? 0) || 0,
+        });
+      }
+
+      const topScoreMap = new Map<string, number>();
+      for (const row of (topScoreRows as unknown) as Array<Record<string, unknown>>) {
+        const classRoomId = Number(row.classRoomId ?? 0) || 0;
+        const className = classNameById.get(classRoomId) ?? "Unassigned";
+        const sectionName = String(row.sectionName ?? "General").trim() || "General";
+        const k = `${classRoomId}::${className}::${sectionName}`;
+        const topScore = Number(row.topScore ?? 0);
+        if (Number.isFinite(topScore)) topScoreMap.set(k, topScore);
       }
 
       const allKeys = new Set<string>([...studentCountMap.keys(), ...resultsMap.keys()]);
       const rows = Array.from(allKeys)
         .map((k) => {
-          const [, className, sectionName] = k.split("::");
+          const [classRoomIdRaw, className, sectionName] = k.split("::");
+          const classRoomId = Number(classRoomIdRaw ?? 0) || 0;
           const totalStudents = studentCountMap.get(k) ?? 0;
           const resultStat = resultsMap.get(k) ?? { count: 0, sum: 0, pass: 0 };
           const avgScore = resultStat.count > 0 ? resultStat.sum / resultStat.count : null;
           const passRate = resultStat.count > 0 ? (resultStat.pass / resultStat.count) * 100 : null;
           const enteredStudents = Math.min(totalStudents, resultStat.count);
           return {
+            classRoomId,
             className,
             sectionName,
             totalStudents,
             resultsEntered: enteredStudents,
             avgScore,
             passRate,
+            topScore: topScoreMap.get(k) ?? null,
           };
         })
         .sort((a, b) => a.className.localeCompare(b.className) || a.sectionName.localeCompare(b.sectionName));
@@ -279,7 +405,7 @@ export function createMeAcademicsRouter() {
   r.get("/academics/result-entry/students", async (req, res) => {
     try {
       const userId = req.userId!;
-      const term = trimStr(req.query.term, 20) ?? "Term 1";
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
       const examTypes = await activeExamTypeKeys();
       if (examTypes.length === 0) {
         return res.status(400).json({ error: "No exam types configured. Add exam types manually first." });
@@ -313,6 +439,7 @@ export function createMeAcademicsRouter() {
           : await StudentAssessmentResult.findAll({
               where: {
                 term,
+                academicYear,
                 examType,
                 studentId: { [Op.in]: ids },
               },
@@ -339,7 +466,7 @@ export function createMeAcademicsRouter() {
   r.get("/academics/result-entry/marksheet", async (req, res) => {
     try {
       const userId = req.userId!;
-      const term = trimStr(req.query.term, 20) ?? "Term 1";
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
       const examTypes = await activeExamTypeKeys();
       if (examTypes.length === 0) {
         return res.status(400).json({ error: "No exam types configured. Add exam types manually first." });
@@ -358,7 +485,16 @@ export function createMeAcademicsRouter() {
 
       const students = await Student.findAll({
         where: { classRoomId },
-        attributes: ["id", "admissionNumber", "firstName", "middleName", "lastName", "sectionName"],
+        attributes: [
+          "id",
+          "admissionNumber",
+          "firstName",
+          "middleName",
+          "lastName",
+          "sectionName",
+          "gender",
+          "passportPhotoFilename",
+        ],
         order: [
           ["first_name", "ASC"],
           ["last_name", "ASC"],
@@ -373,6 +509,7 @@ export function createMeAcademicsRouter() {
                 studentId: { [Op.in]: studentIds },
                 classRoomId,
                 term,
+                academicYear,
                 examType,
               },
               attributes: ["studentId", "subject", "score"],
@@ -381,18 +518,29 @@ export function createMeAcademicsRouter() {
       const configuredSubjects = classRow.categoryId
         ? await AcademicSubjectAssignment.findAll({
             where: { classCategoryId: classRow.categoryId },
-            attributes: ["subjectName"],
+            attributes: ["subjectName", "shortForm"],
             order: [["subject_name", "ASC"]],
           })
         : [];
-      const subjectSet = new Set<string>(
-        configuredSubjects.map((x) => x.subjectName.trim()).filter(Boolean),
-      );
+      const shortFormBySubject = new Map<string, string>();
+      const subjectSet = new Set<string>();
+      for (const row of configuredSubjects) {
+        const name = row.subjectName.trim();
+        if (!name) continue;
+        subjectSet.add(name);
+        const sf = (row.shortForm ?? "").trim().toUpperCase();
+        if (sf) shortFormBySubject.set(name, sf);
+      }
       for (const row of resultRows) {
         const subject = row.subject.trim();
         if (subject) subjectSet.add(subject);
       }
       const subjects = Array.from(subjectSet).sort((a, b) => a.localeCompare(b));
+      const subjectsMeta = subjects.map((name) => ({
+        name,
+        shortForm: shortFormBySubject.get(name) ?? null,
+      }));
+      const hasMissingSubjectShortForms = subjectsMeta.some((s) => !s.shortForm);
 
       const markMap = new Map<string, number>();
       for (const row of resultRows) {
@@ -414,6 +562,8 @@ export function createMeAcademicsRouter() {
           admissionNumber: student.admissionNumber,
           fullName: [student.firstName, student.middleName, student.lastName].filter(Boolean).join(" "),
           sectionName: student.sectionName ?? null,
+          gender: (student.gender ?? null),
+          hasPassportPhoto: Boolean((student as unknown as { passportPhotoFilename?: unknown }).passportPhotoFilename),
           marksBySubject,
           totalMarks: Number(totalMarks.toFixed(2)),
           position: 0,
@@ -438,8 +588,11 @@ export function createMeAcademicsRouter() {
           categoryId: classRow.categoryId,
           categoryName: classRow.categoryName,
           term,
+          academicYear,
           examType,
           subjects,
+          subjectsMeta,
+          hasMissingSubjectShortForms,
           rows,
         },
       });
@@ -452,7 +605,7 @@ export function createMeAcademicsRouter() {
   r.get("/academics/result-entry/pending-students", async (req, res) => {
     try {
       const userId = req.userId!;
-      const term = trimStr(req.query.term, 20) ?? "Term 1";
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
       const includeSaved = String(req.query.includeSaved ?? "").toLowerCase() === "true";
       const examTypes = await activeExamTypeKeys();
       if (examTypes.length === 0) {
@@ -469,7 +622,7 @@ export function createMeAcademicsRouter() {
         attributes: ["id", "admissionNumber", "firstName", "middleName", "lastName", "sectionName", "classRoomId"],
       });
       const resultRows = await StudentAssessmentResult.findAll({
-        where: { term, examType, classRoomId: { [Op.in]: classIds } },
+        where: { term, academicYear, examType, classRoomId: { [Op.in]: classIds } },
         attributes: ["studentId"],
       });
       const hasRecord = new Set(resultRows.map((x) => x.studentId));
@@ -514,7 +667,7 @@ export function createMeAcademicsRouter() {
     try {
       const userId = req.userId!;
       const studentId = Number(req.params.studentId);
-      const term = trimStr(req.query.term, 20) ?? "Term 1";
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
       const examTypes = await activeExamTypeKeys();
       if (examTypes.length === 0) {
         return res.status(400).json({ error: "No exam types configured. Add exam types manually first." });
@@ -543,7 +696,7 @@ export function createMeAcademicsRouter() {
         student.sectionName ?? null,
       );
       const resultRows = await StudentAssessmentResult.findAll({
-        where: { studentId, term, examType, subject: { [Op.in]: subjects } },
+        where: { studentId, term, academicYear, examType, subject: { [Op.in]: subjects } },
         attributes: ["subject", "score"],
       });
       const gradingScale = await loadGradingScale();
@@ -574,6 +727,7 @@ export function createMeAcademicsRouter() {
           className,
           sectionName: student.sectionName ?? null,
           term,
+          academicYear,
           examType,
           expectedSubjectCount,
           summary: {
@@ -611,6 +765,24 @@ export function createMeAcademicsRouter() {
       if (!term) return res.status(400).json({ error: "term is required" });
       if (!examType) return res.status(400).json({ error: "examType is required" });
 
+      const official = await loadOfficialSchoolTermYear();
+      const role = await getUserRole(userId);
+      let persistTerm = term;
+      let persistYear = official.academicYear;
+      if (role !== "admin" && role !== "super_admin") {
+        if (term !== official.term) {
+          return res.status(403).json({
+            error:
+              "Marks can only be saved for the school's current term. Ask an administrator to edit other terms.",
+          });
+        }
+        persistTerm = official.term;
+        persistYear = official.academicYear;
+      } else {
+        const y = trimStr(body.academicYear, 4);
+        if (y && /^\d{4}$/.test(y)) persistYear = y;
+      }
+
       const student = await Student.findByPk(studentId, {
         include: [{ model: ClassRoom, as: "classRoom", attributes: ["id", "name"], required: false }],
       });
@@ -641,10 +813,11 @@ export function createMeAcademicsRouter() {
         const score = Math.max(0, Math.min(100, Number(scoreRaw.toFixed(2))));
 
         const [row] = await StudentAssessmentResult.findOrCreate({
-          where: { studentId, term, examType, subject },
+          where: { studentId, term: persistTerm, academicYear: persistYear, examType, subject },
           defaults: {
             classRoomId: student.classRoomId,
             sectionName: normalizedSectionName,
+            academicYear: persistYear,
             subject,
             score,
             remarks: null,
@@ -673,7 +846,7 @@ export function createMeAcademicsRouter() {
     try {
       const userId = req.userId!;
       const studentId = Number(req.params.studentId);
-      const term = trimStr(req.query.term, 20) ?? "Term 1";
+      const { term, academicYear } = await resolveReadTermYearFromQuery(req.query);
       const examTypes = await activeExamTypeKeys();
       if (examTypes.length === 0) {
         return res.status(400).json({ error: "No exam types configured. Add exam types manually first." });
@@ -704,7 +877,7 @@ export function createMeAcademicsRouter() {
         student.sectionName ?? null,
       );
       const results = await StudentAssessmentResult.findAll({
-        where: { studentId, term, examType, subject: { [Op.in]: subjects } },
+        where: { studentId, term, academicYear, examType, subject: { [Op.in]: subjects } },
         attributes: ["subject", "score"],
       });
       const gradingScale = await loadGradingScale();
@@ -738,6 +911,7 @@ export function createMeAcademicsRouter() {
           className,
           sectionName: student.sectionName ?? null,
           term,
+          academicYear,
           examType,
           expectedSubjectCount,
           enteredSubjectCount: completedRows.length,
@@ -889,6 +1063,7 @@ export function createMeAcademicsRouter() {
           classCategoryId: x.classCategoryId,
           sectionName: x.sectionName?.trim() || null,
           subjectName: x.subjectName,
+          shortForm: (x.shortForm ?? "").trim().toUpperCase() || null,
         })),
       });
     } catch (err) {
@@ -907,18 +1082,25 @@ export function createMeAcademicsRouter() {
       const classCategoryId = Number(body.classCategoryId);
       const sectionName = trimStr(body.sectionName, 80) ?? "";
       const subjectName = trimStr(body.subjectName, 120);
+      const shortForm = normalizeSubjectShortForm(body.shortForm);
       if (!Number.isFinite(classCategoryId) || classCategoryId < 1) {
         return res.status(400).json({ error: "classCategoryId is required" });
       }
       if (!subjectName) return res.status(400).json({ error: "subjectName is required" });
+      if (!shortForm) {
+        return res.status(400).json({ error: "shortForm is required (2–5 chars, uppercase; letters/numbers/dot)" });
+      }
 
       const category = await ClassCategory.findByPk(classCategoryId);
       if (!category) return res.status(400).json({ error: "Invalid classCategoryId" });
 
       const [row] = await AcademicSubjectAssignment.findOrCreate({
         where: { classCategoryId, sectionName, subjectName },
-        defaults: { classCategoryId, sectionName, subjectName },
+        defaults: { classCategoryId, sectionName, subjectName, shortForm },
       });
+      if ((row.shortForm ?? "").trim() !== shortForm) {
+        await row.update({ shortForm });
+      }
 
       return res.status(201).json({
         item: {
@@ -926,6 +1108,7 @@ export function createMeAcademicsRouter() {
           classCategoryId: row.classCategoryId,
           sectionName: row.sectionName?.trim() || null,
           subjectName: row.subjectName,
+          shortForm: (row.shortForm ?? "").trim().toUpperCase() || null,
         },
       });
     } catch (err) {
@@ -944,8 +1127,123 @@ export function createMeAcademicsRouter() {
       if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: "Invalid id" });
       const row = await AcademicSubjectAssignment.findByPk(id);
       if (!row) return res.status(404).json({ error: "Not found" });
+
+      // Cascade delete: remove any recorded marks / schedules for this subject within the same category.
+      const classRoomRows = await ClassRoom.findAll({
+        where: { categoryId: row.classCategoryId },
+        attributes: ["id"],
+      });
+      const classRoomIds = classRoomRows.map((x) => x.id);
+      if (classRoomIds.length > 0) {
+        await StudentAssessmentResult.destroy({
+          where: { classRoomId: { [Op.in]: classRoomIds }, subject: row.subjectName },
+        });
+        await Exam.destroy({
+          where: { classRoomId: { [Op.in]: classRoomIds }, subject: row.subjectName },
+        });
+      }
+
       await row.destroy();
       return res.status(204).send();
+    } catch (err) {
+      console.error(err);
+      return res.status(503).json({ error: "Database unavailable" });
+    }
+  });
+
+  r.get("/academics/config/subjects/:id(\\d+)/usage", async (req, res) => {
+    try {
+      const userId = req.userId!;
+      const role = await getUserRole(userId);
+      if (role !== "admin") return res.status(403).json({ error: "Only admins can manage subjects" });
+
+      const id = routeParamId(req);
+      if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: "Invalid id" });
+      const row = await AcademicSubjectAssignment.findByPk(id);
+      if (!row) return res.status(404).json({ error: "Not found" });
+
+      const classRoomRows = await ClassRoom.findAll({
+        where: { categoryId: row.classCategoryId },
+        attributes: ["id"],
+      });
+      const classRoomIds = classRoomRows.map((x) => x.id);
+      if (classRoomIds.length === 0) return res.json({ marksCount: 0, examsCount: 0 });
+
+      const [marksCount, examsCount] = await Promise.all([
+        StudentAssessmentResult.count({ where: { classRoomId: { [Op.in]: classRoomIds }, subject: row.subjectName } }),
+        Exam.count({ where: { classRoomId: { [Op.in]: classRoomIds }, subject: row.subjectName } }),
+      ]);
+      return res.json({ marksCount, examsCount });
+    } catch (err) {
+      console.error(err);
+      return res.status(503).json({ error: "Database unavailable" });
+    }
+  });
+
+  r.patch("/academics/config/subjects/:id(\\d+)", async (req, res) => {
+    try {
+      const userId = req.userId!;
+      const role = await getUserRole(userId);
+      if (role !== "admin") return res.status(403).json({ error: "Only admins can manage subjects" });
+
+      const id = routeParamId(req);
+      if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: "Invalid id" });
+      const row = await AcademicSubjectAssignment.findByPk(id);
+      if (!row) return res.status(404).json({ error: "Not found" });
+      const prevSubjectName = row.subjectName;
+
+      const body = req.body as Record<string, unknown>;
+      const classCategoryId = Number(body.classCategoryId);
+      const sectionName = trimStr(body.sectionName, 80) ?? "";
+      const subjectName = trimStr(body.subjectName, 120);
+      const shortForm = normalizeSubjectShortForm(body.shortForm);
+
+      if (!Number.isFinite(classCategoryId) || classCategoryId < 1) {
+        return res.status(400).json({ error: "classCategoryId is required" });
+      }
+      if (!subjectName) return res.status(400).json({ error: "subjectName is required" });
+      if (!shortForm) {
+        return res.status(400).json({ error: "shortForm is required (2–5 chars, uppercase; letters/numbers/dot)" });
+      }
+
+      const category = await ClassCategory.findByPk(classCategoryId);
+      if (!category) return res.status(400).json({ error: "Invalid classCategoryId" });
+
+      await row.update({
+        classCategoryId,
+        sectionName,
+        subjectName,
+        shortForm,
+      });
+
+      // If the subject name is being edited, update any stored marks/schedules to keep data consistent.
+      if (prevSubjectName !== subjectName) {
+        const classRoomRows = await ClassRoom.findAll({
+          where: { categoryId: classCategoryId },
+          attributes: ["id"],
+        });
+        const classRoomIds = classRoomRows.map((x) => x.id);
+        if (classRoomIds.length > 0) {
+          await StudentAssessmentResult.update(
+            { subject: subjectName },
+            { where: { classRoomId: { [Op.in]: classRoomIds }, subject: prevSubjectName } },
+          );
+          await Exam.update(
+            { subject: subjectName },
+            { where: { classRoomId: { [Op.in]: classRoomIds }, subject: prevSubjectName } },
+          );
+        }
+      }
+
+      return res.json({
+        item: {
+          id: row.id,
+          classCategoryId: row.classCategoryId,
+          sectionName: row.sectionName?.trim() || null,
+          subjectName: row.subjectName,
+          shortForm: (row.shortForm ?? "").trim().toUpperCase() || null,
+        },
+      });
     } catch (err) {
       console.error(err);
       return res.status(503).json({ error: "Database unavailable" });

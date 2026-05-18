@@ -12,11 +12,13 @@ import { localeLabels, type Locale } from "../../i18n/messages";
 import { useTheme } from "../../theme/ThemeProvider";
 import type { InboxItem } from "./headerInboxDemo";
 import { HeaderInboxDropdown } from "./HeaderInboxDropdown";
+import { TermYearPicker } from "./TermYearPicker";
 import type { ClassesSection } from "../classes/ClassesSectionPage";
 import type { CurriculumSection } from "../curriculum/CurriculumSectionPage";
 
 export type AdminUser = {
   sub: string;
+  name?: string;
   role: string;
   email: string;
   twoFactorEnabled?: boolean;
@@ -60,8 +62,9 @@ type AdminLayoutProps = {
       | "assign_fees"
       | "record_payment"
       | "receipts"
-      | "bursery"
-      | "busery"
+      | "expenses"
+      | "bursary"
+      | "bursary_assignment"
       | "staff_payment"
       | "finance_summary",
   ) => void;
@@ -69,6 +72,10 @@ type AdminLayoutProps = {
   onSelectCurriculumSection?: (section: CurriculumSection) => void;
   /** Communication hub: open the notice board dashboard. */
   onSelectCommunicationSection?: () => void;
+  /** Attendance hub: navigate to an attendance sub-page. */
+  onSelectAttendanceSection?: (section: "list" | "take" | "reports") => void;
+  /** Results hub: navigate to a results sub-page. */
+  onSelectResultsSection?: (section: "list" | "entry" | "transcript" | "report_cards") => void;
   /** Refresh `/api/auth/me` after password or 2FA changes. */
   onAccountUpdated?: () => void;
 };
@@ -358,6 +365,8 @@ type NavLeaf = {
   inboxList?: "notifications" | "messages";
   studentSection?: "overview" | "all" | "admissions" | "profiles" | "import" | "parents";
   staffSection?: "teaching" | "nonTeaching";
+  attendanceSection?: "list" | "take" | "reports";
+  resultsSection?: "list" | "entry" | "transcript" | "report_cards";
   financeSection?:
     | "overview"
     | "daily_report"
@@ -365,8 +374,9 @@ type NavLeaf = {
     | "assign_fees"
     | "record_payment"
     | "receipts"
-    | "bursery"
-    | "busery"
+    | "expenses"
+    | "bursary"
+    | "bursary_assignment"
     | "staff_payment"
     | "finance_summary";
   curriculumSection?: CurriculumSection;
@@ -493,9 +503,9 @@ function buildNavGroups(
         { icon: IconWallet, label: t("nav.operations.assignFees"), financeSection: "assign_fees", requiredPermission: "finance_assign_fees" },
         { icon: IconWallet, label: t("nav.operations.accounts"), financeSection: "record_payment", requiredPermission: "finance_record_payments" },
         { icon: IconClipboard, label: t("nav.operations.receipts"), financeSection: "receipts", requiredPermission: "finance_record_payments" },
-        { icon: IconBus, label: t("nav.operations.transport"), financeSection: "bursery", requiredPermission: "finance_record_payments" },
+        { icon: IconBus, label: t("nav.operations.transport"), financeSection: "expenses", requiredPermission: "finance_record_payments" },
         { icon: IconUsers, label: t("nav.operations.hostel"), financeSection: "staff_payment", requiredPermission: "finance_staff_pay" },
-        { icon: IconClipboard, label: t("nav.operations.busery"), financeSection: "busery", requiredPermission: "finance_bursary" },
+        { icon: IconClipboard, label: t("nav.operations.busery"), financeSection: "bursary", requiredPermission: "finance_bursary" },
         { icon: IconChartBars, label: t("nav.operations.hostelManager"), financeSection: "finance_summary", requiredPermission: "finance_summaries" },
       ],
     },
@@ -556,10 +566,32 @@ function buildNavGroups(
           requiredPermission: "settings_general",
         },
         { icon: IconGrid, label: t("nav.settings.general"), settingsPanel: "general", requiredPermission: "settings_general" },
-        { icon: IconBell, label: t("nav.settings.notifications") },
+        { icon: IconBell, label: "Notifications", settingsPanel: "notifications" },
+        { icon: IconClipboard, label: "Audit Log", settingsPanel: "audit_log", requiredPermission: "settings_users_roles" },
         { icon: IconUsers, label: t("nav.settings.users"), settingsPanel: "users_roles", requiredPermission: "settings_users_roles" },
         { icon: IconBackup, label: t("nav.settings.backup"), requiredPermission: "settings_backup" },
         { icon: IconRestore, label: t("nav.settings.restore"), requiredPermission: "settings_restore" },
+      ],
+    },
+    {
+      id: "attendance",
+      title: "Attendance",
+      icon: IconClipboard,
+      items: [
+        { icon: IconClipboard, label: "Today's Attendance", attendanceSection: "list", requiredPermission: "attendance_view" },
+        { icon: IconGrid, label: "Take Attendance", attendanceSection: "take", requiredPermission: "attendance_mark" },
+        { icon: IconChartBars, label: "Attendance Reports", attendanceSection: "reports", requiredPermission: "attendance_view" },
+      ],
+    },
+    {
+      id: "results",
+      title: "Results",
+      icon: IconGradCap,
+      items: [
+        { icon: IconChartBars, label: "View Results", resultsSection: "list", requiredPermission: "results_view" },
+        { icon: IconClipboard, label: "Results Entry", resultsSection: "entry", requiredPermission: "results_entry" },
+        { icon: IconFileSpreadsheet, label: "Transcript", resultsSection: "transcript", requiredPermission: "results_view" },
+        { icon: IconGradCap, label: "Report Cards", resultsSection: "report_cards", requiredPermission: "results_view" },
       ],
     },
   ];
@@ -646,6 +678,8 @@ export function AdminLayout({
   onSelectFinanceSection,
   onSelectCurriculumSection,
   onSelectCommunicationSection,
+  onSelectAttendanceSection,
+  onSelectResultsSection,
   onAccountUpdated,
 }: AdminLayoutProps) {
   const { t, locale, setLocale } = useI18n();
@@ -875,6 +909,7 @@ export function AdminLayout({
           className="fixed inset-0 z-40 bg-[#2d3436]/25 backdrop-blur-[3px] lg:hidden"
           aria-label={t("layout.closeMenu")}
           onClick={() => setSidebarOpen(false)}
+          title="Close sidebar menu"
         />
       ) : null}
 
@@ -889,6 +924,7 @@ export function AdminLayout({
             className="neo-icon-btn absolute left-2 top-2 rounded-lg p-1.5 text-[#636e72] lg:hidden"
             onClick={() => setSidebarOpen(false)}
             aria-label={t("layout.closeSidebar")}
+            title="Close sidebar navigation"
           >
             <MenuIcon />
           </button>
@@ -923,6 +959,7 @@ export function AdminLayout({
                         setSidebarOpen(false);
                       }}
                       className="group flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left neo-nav-group-idle rounded-xl"
+                      title={group.title}
                     >
                       <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-white/25 text-[#636e72] transition group-hover:bg-white/45 group-hover:text-[#2d3436]">
                         <GroupIcon className="h-[13px] w-[13px]" />
@@ -961,6 +998,7 @@ export function AdminLayout({
                     className={`group flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left ${
                       open ? "neo-nav-group-active" : "neo-nav-group-idle rounded-xl"
                     }`}
+                    title={group.title}
                   >
                     <span
                       className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition ${
@@ -989,6 +1027,7 @@ export function AdminLayout({
                               setSidebarOpen(false);
                             }}
                             className="neo-nav-item flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] font-semibold leading-snug text-[#636e72]"
+                            title={t("nav.curriculum.examsDashboard")}
                           >
                             <IconChartBars className="h-3.5 w-3.5 shrink-0 text-[#5a8faf] opacity-90" />
                             <span className="min-w-0 flex-1 truncate">
@@ -1006,6 +1045,7 @@ export function AdminLayout({
                             type="button"
                             onClick={() => setCurriculumExamOpen((v) => !v)}
                             className="neo-nav-item flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] font-semibold leading-snug text-[#636e72]"
+                            title={t("nav.curriculum.exams")}
                           >
                             <IconGradCap className="h-3.5 w-3.5 shrink-0 text-[#5a8faf] opacity-90" />
                             <span className="min-w-0 flex-1 truncate">{t("nav.curriculum.exams")}</span>
@@ -1074,6 +1114,7 @@ export function AdminLayout({
                               setSidebarOpen(false);
                             }}
                             className="neo-nav-item flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] font-medium leading-snug text-[#636e72]"
+                            title={t("nav.curriculum.resultsEntry")}
                           >
                             <IconClipboard className="h-3.5 w-3.5 shrink-0 text-[#5a8faf] opacity-90" />
                             <span className="min-w-0 flex-1 truncate">{t("nav.curriculum.resultsEntry")}</span>
@@ -1144,9 +1185,16 @@ export function AdminLayout({
                                   if (item.communicationSection === "notice") {
                                     onSelectCommunicationSection?.();
                                   }
+                                  if (item.attendanceSection) {
+                                    onSelectAttendanceSection?.(item.attendanceSection);
+                                  }
+                                  if (item.resultsSection) {
+                                    onSelectResultsSection?.(item.resultsSection);
+                                  }
                                   setSidebarOpen(false);
                                 }}
                                 className="neo-nav-item flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] font-medium leading-snug text-[#636e72]"
+                                title={item.label}
                               >
                                 {ItemIcon ? (
                                   <ItemIcon className="h-3.5 w-3.5 shrink-0 text-[#5a8faf] opacity-90" />
@@ -1181,6 +1229,7 @@ export function AdminLayout({
               className="neo-icon-btn rounded-lg p-1.5 text-[#636e72] lg:hidden"
               onClick={() => setSidebarOpen(true)}
               aria-label={t("layout.openMenu")}
+              title="Open sidebar navigation"
             >
               <MenuIcon />
             </button>
@@ -1225,6 +1274,7 @@ export function AdminLayout({
                   aria-haspopup="listbox"
                   aria-label={t("layout.changeLanguage")}
                   className="flex items-center gap-1.5 rounded-full bg-gradient-to-br from-[#cde8cf] to-[#9dc6a0] px-2.5 py-1 text-[10px] font-semibold text-[#2d3436] shadow-[2px_2px_6px_rgba(120,150,125,0.35),-2px_-2px_5px_rgba(255,255,255,0.85)] transition hover:brightness-105 sm:text-[11px]"
+                  title="Change system language"
                 >
                   <IconGlobe className="shrink-0" />
                   {localeLabels[locale]}
@@ -1256,6 +1306,7 @@ export function AdminLayout({
                   </ul>
                 ) : null}
               </div>
+              <TermYearPicker />
               <div className="relative" ref={notifWrapRef}>
                 <button
                   type="button"
@@ -1269,6 +1320,7 @@ export function AdminLayout({
                   aria-haspopup="dialog"
                   aria-label={`${t("layout.notifications")}${unreadNotifCount > 0 ? `, ${unreadNotifCount} unread` : ""}`}
                   className={`neo-icon-btn relative p-2 text-[#636e72] ${notifPanelOpen ? "bg-[#b9d9eb]/40" : ""}`}
+                  title="View notifications"
                 >
                   <IconBell />
                   {unreadNotifCount > 0 ? (
@@ -1316,6 +1368,7 @@ export function AdminLayout({
                   aria-haspopup="dialog"
                   aria-label={`${t("layout.messages")}${unreadMsgCount > 0 ? `, ${unreadMsgCount} unread` : ""}`}
                   className={`neo-icon-btn relative p-2 text-[#636e72] ${msgPanelOpen ? "bg-[#b9d9eb]/40" : ""}`}
+                  title="View messages"
                 >
                   <IconMail />
                   {unreadMsgCount > 0 ? (
@@ -1376,6 +1429,7 @@ export function AdminLayout({
                       ? "bg-gradient-to-br from-[#cde8cf] to-[#b8d8ba] shadow-[inset_1px_1px_3px_rgba(0,0,0,0.06)]"
                       : ""
                   }`}
+                  title="Account and profile settings"
                 >
                   {profileLoading ? (
                     <span className="flex h-5 w-5 items-center justify-center text-[10px] text-[#636e72]">
@@ -1434,6 +1488,7 @@ export function AdminLayout({
                           type="button"
                           className="flex w-full items-center gap-2 border-b border-[#ebe4d9]/80 bg-[#faf9f6]/90 px-3 py-2.5 text-left text-xs font-semibold text-[#5a8faf] transition hover:bg-[#b9d9eb]/20 hover:text-[#2d3436]"
                           onClick={() => setUserMenuProfile(false)}
+                          title="Back to main account menu"
                         >
                           <svg className="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" aria-hidden>
                             <path
@@ -1553,6 +1608,7 @@ export function AdminLayout({
                                     }
                                   }}
                                   className="w-full rounded-xl bg-gradient-to-br from-[#b9d9eb]/50 to-[#cde8cf]/40 py-2 text-xs font-bold text-[#2d3436] transition hover:brightness-105 disabled:opacity-60"
+                                  title="Request an OTP code to change your password"
                                 >
                                   {pwBusy ? t("layout.profile.sending") : t("layout.profile.changePasswordSendCode")}
                                 </button>

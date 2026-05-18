@@ -1,9 +1,54 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useI18n } from "../i18n/I18nProvider";
 import { type DashboardCalendar, type DashboardLearner } from "../api/dashboard";
 
 const learnerToolbarBtn =
   "rounded-xl bg-white p-2.5 text-slate-500 shadow-sm transition hover:text-indigo-600 hover:bg-slate-50 border border-slate-200 active:scale-95";
+
+export function OverviewErrorBanner({ message }: { message: string }) {
+  return (
+    <div className="rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm font-bold text-red-700">
+      ⚠️ {message}
+    </div>
+  );
+}
+
+export function OverviewSkeletonCard({ rows = 4 }: { rows?: number }) {
+  return (
+    <div className="space-y-3">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="h-12 rounded-xl bg-slate-100 animate-pulse" />
+      ))}
+    </div>
+  );
+}
+
+export function LiveClock() {
+  const [time, setTime] = useState(new Date());
+  useEffect(() => {
+    const t = setInterval(() => setTime(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div className="flex shadow-sm items-center gap-3 bg-white rounded-xl px-5 py-3 border border-slate-200 shrink-0">
+      <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.8)]" />
+      <div className="font-mono flex divide-x divide-slate-200">
+        <span className="text-indigo-600 font-bold tracking-widest pr-3 text-sm">
+          {time.toLocaleTimeString("en-US", { hour12: false })}
+        </span>
+        <span className="text-slate-500 font-bold tracking-wider pl-3 text-sm">
+          {time
+            .toLocaleDateString("en-US", {
+              day: "2-digit",
+              month: "short",
+              year: "numeric",
+            })
+            .toUpperCase()}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 export function LearnerProfileCard({ learner }: { learner: DashboardLearner }) {
   const { t } = useI18n();

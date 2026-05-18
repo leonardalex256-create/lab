@@ -1,21 +1,48 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { type DashboardPayload } from "../api/dashboard";
 import { fetchPerformanceSummary, type PerformanceSummaryRow } from "../api/academics";
 import { useI18n } from "../i18n/I18nProvider";
-import { StatCard, EventScheduleCard, DashboardSectionTitle } from "./OverviewShared";
+import { useTermContext } from "../context/TermContext";
+import { StatCard, EventScheduleCard, DashboardSectionTitle, OverviewErrorBanner } from "./OverviewShared";
 
 export function DOSOverview({ dash, loading }: { dash: DashboardPayload | null, loading: boolean }) {
   const { t } = useI18n();
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
   const [summary, setSummary] = useState<PerformanceSummaryRow[]>([]);
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const availableExamTypes = useMemo(
+    () => dash?.availableExamTypes ?? ["BOT", "MID", "EOT"],
+    [dash?.availableExamTypes],
+  );
+  const [selectedExamType, setSelectedExamType] = useState("BOT");
 
   useEffect(() => {
+    if (!availableExamTypes.includes(selectedExamType)) {
+      setSelectedExamType(availableExamTypes[0] ?? "BOT");
+    }
+  }, [availableExamTypes, selectedExamType]);
+
+  useEffect(() => {
+    let cancelled = false;
     setSummaryLoading(true);
-    fetchPerformanceSummary("Term 1", "BOT")
-      .then(setSummary)
-      .catch(console.error)
-      .finally(() => setSummaryLoading(false));
-  }, []);
+    setError(null);
+    void fetchPerformanceSummary(viewingTerm, selectedExamType, viewingAcademicYear)
+      .then((rows) => {
+        if (!cancelled) setSummary(rows);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Failed to load performance data");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSummaryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewingTerm, viewingAcademicYear, selectedExamType]);
 
   const s = dash?.stats;
   const avgPassRate = summary.length > 0 
@@ -71,7 +98,27 @@ export function DOSOverview({ dash, loading }: { dash: DashboardPayload | null, 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="lg:col-span-2 space-y-6">
           <section className="neo-card p-5">
-            <h3 className="mb-4 text-sm font-bold uppercase tracking-wider text-[#636e72]">Performance by Class (BOT Term 1)</h3>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
+              <h3 className="text-sm font-bold uppercase tracking-wider text-[#636e72]">
+                Performance by Class ({selectedExamType} {viewingTerm})
+              </h3>
+              <select
+                value={selectedExamType}
+                onChange={(e) => setSelectedExamType(e.target.value)}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700"
+              >
+                {availableExamTypes.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {error ? (
+              <div className="mb-4">
+                <OverviewErrorBanner message={error} />
+              </div>
+            ) : null}
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead>
@@ -105,16 +152,26 @@ export function DOSOverview({ dash, loading }: { dash: DashboardPayload | null, 
           <EventScheduleCard calendar={dash?.calendar ?? null} />
           <section className="neo-card p-5 bg-gradient-to-br from-[#f5f0e6] to-[#e8f2ec]">
             <h3 className="text-sm font-bold text-[#2d3436] mb-2 uppercase tracking-tight">Academic Alerts</h3>
-            <ul className="space-y-2 text-xs font-semibold text-[#636e72]">
-              <li className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-orange-400"></span>
-                P.4 Results Entry: 40% Pending
-              </li>
-              <li className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-red-400"></span>
-                EOT Exam Timetable Draft Needed
-              </li>
-            </ul>
+            {(dash?.academicAlerts ?? []).length === 0 ? (
+              <p className="text-xs text-[#636e72] italic opacity-80">No active academic alerts.</p>
+            ) : (
+              <ul className="space-y-2 text-xs font-semibold text-[#636e72]">
+                {(dash?.academicAlerts ?? []).map((a, idx) => {
+                  const dot =
+                    a.level === "danger"
+                      ? "bg-red-400"
+                      : a.level === "warning"
+                        ? "bg-amber-400"
+                        : "bg-blue-400";
+                  return (
+                    <li key={idx} className="flex items-center gap-2">
+                      <span className={`h-2 w-2 rounded-full ${dot}`} />
+                      {a.message}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </section>
         </div>
       </div>

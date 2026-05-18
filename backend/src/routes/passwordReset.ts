@@ -13,7 +13,8 @@ const requestSchema = z.object({
     .string()
     .trim()
     .min(1, "Enter your email address")
-    .email("Enter a valid email address"),
+    .email("Enter a valid email address")
+    .refine((v) => v === v.toLowerCase(), { message: "Email must be lowercase." }),
 });
 
 const verifyOtpSchema = z.object({
@@ -21,7 +22,8 @@ const verifyOtpSchema = z.object({
     .string()
     .trim()
     .min(1, "Enter your email address")
-    .email("Enter a valid email address"),
+    .email("Enter a valid email address")
+    .refine((v) => v === v.toLowerCase(), { message: "Email must be lowercase." }),
   otp: z.string().min(4),
 });
 

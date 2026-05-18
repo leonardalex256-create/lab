@@ -222,6 +222,7 @@ function StaffTableRowActionsMenu({
           aria-haspopup="menu"
           onClick={() => onOpenMenuChange(open ? null : rowKey)}
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white text-xl font-bold leading-none text-slate-500 ring-1 ring-slate-200 shadow-sm transition hover:bg-slate-50 hover:text-indigo-600"
+          title="View actions for this staff member"
         >
           <span className="block translate-y-px" aria-hidden>
             ⋮
@@ -240,6 +241,7 @@ function StaffTableRowActionsMenu({
                 onProfile();
                 onOpenMenuChange(null);
               }}
+              title="View full staff profile"
             >
               Profile
             </button>
@@ -251,6 +253,7 @@ function StaffTableRowActionsMenu({
                 onEdit();
                 onOpenMenuChange(null);
               }}
+              title="Edit staff details"
             >
               Edit
             </button>
@@ -262,6 +265,7 @@ function StaffTableRowActionsMenu({
                 onDelete();
                 onOpenMenuChange(null);
               }}
+              title="Delete staff record"
             >
               Delete
             </button>
@@ -541,6 +545,7 @@ function TeachingStaffForm({
           <button
             type="submit"
             className="rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+            title="Submit and save staff registration"
           >
             {initialData ? "Save Changes" : "Save Staff"}
           </button>
@@ -548,6 +553,7 @@ function TeachingStaffForm({
             type="button"
             onClick={onCancel}
             className="rounded-xl border border-slate-200 bg-white px-6 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900"
+            title="Discard changes and cancel"
           >
             Cancel
           </button>
@@ -563,10 +569,10 @@ function NonTeachingStaffForm({
   initialData,
 }: {
   onCancel: () => void;
-  onSave: (staff: NonTeachingStaffRecord) => void;
+  onSave: (staff: NonTeachingStaffRecord) => Promise<void>;
   initialData?: NonTeachingStaffRecord | null;
 }) {
-  const [submitted, setSubmitted] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [nationalIdPhotoFile, setNationalIdPhotoFile] = useState<File | null>(null);
 
   return (
@@ -581,9 +587,10 @@ function NonTeachingStaffForm({
         className="mt-4 grid gap-3 sm:grid-cols-2"
         onSubmit={(e) => {
           e.preventDefault();
-          const form = new FormData(e.currentTarget);
-          onSave({
-            id: initialData?.id ?? Math.floor(Math.random() * 900000 + 100000),
+          const formEl = e.currentTarget;
+          const form = new FormData(formEl);
+          const payload: NonTeachingStaffRecord = {
+            id: initialData?.id ?? 0,
             name: ((form.get("nonstaff-full-name") as string) ?? "").trim(),
             role: ((form.get("nonstaff-role") as string) ?? "").trim(),
             category: (form.get("nonstaff-category") as Exclude<NonTeachingCategory, "all">) ?? "administration",
@@ -597,10 +604,18 @@ function NonTeachingStaffForm({
             nationalIdPhotoUrl: nationalIdPhotoFile
               ? URL.createObjectURL(nationalIdPhotoFile)
               : initialData?.nationalIdPhotoUrl,
-          });
-          setSubmitted(true);
-          e.currentTarget.reset();
-          setNationalIdPhotoFile(null);
+          };
+          setSaving(true);
+          void (async () => {
+            try {
+              await onSave(payload);
+              setNationalIdPhotoFile(null);
+            } catch {
+              /* parent sets staffError */
+            } finally {
+              setSaving(false);
+            }
+          })();
         }}
       >
         <div>
@@ -666,22 +681,21 @@ function NonTeachingStaffForm({
             <p className="mt-1 text-xs text-slate-500">Current: {initialData.nationalIdPhotoName}</p>
           ) : null}
         </div>
-        {submitted ? (
-          <p className="sm:col-span-2 text-sm font-semibold text-emerald-600">
-            Form submitted. (Demo mode: no backend save yet.)
-          </p>
-        ) : null}
         <div className="sm:col-span-2 flex flex-wrap gap-3 pt-4">
           <button
             type="submit"
-            className="rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+            disabled={saving}
+            className="rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60"
+            title="Submit and save non-teaching staff registration"
           >
-            {initialData ? "Save Changes" : "Save Non Staff"}
+            {saving ? "Saving…" : initialData ? "Save Changes" : "Save Non Staff"}
           </button>
           <button
             type="button"
             onClick={onCancel}
-            className="rounded-xl border border-slate-200 bg-white px-6 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900"
+            disabled={saving}
+            className="rounded-xl border border-slate-200 bg-white px-6 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+            title="Discard changes and cancel"
           >
             Cancel
           </button>
@@ -848,7 +862,7 @@ export function StaffSectionPage({
     });
     const next = mapNonTeachingStaff(created);
     setNonTeachingStaff((prev) => [next, ...prev]);
-    setSelectedNonTeachingProfile(next);
+    setSelectedNonTeachingProfile(null);
     setShowNonTeachingForm(false);
   }
 
@@ -904,7 +918,7 @@ export function StaffSectionPage({
     });
     const next = mapNonTeachingStaff(updated);
     setNonTeachingStaff((prev) => prev.map((x) => (x.id === next.id ? next : x)));
-    setSelectedNonTeachingProfile(next);
+    setSelectedNonTeachingProfile(null);
     setEditingNonTeachingStaff(null);
     setShowNonTeachingForm(false);
   }
@@ -929,6 +943,7 @@ export function StaffSectionPage({
             className="absolute inset-0 bg-[#2d3436]/40 backdrop-blur-[2px]"
             onClick={() => setConfirmDelete(null)}
             aria-label="Close warning dialog"
+            title="Close warning dialog"
           />
           <div className="relative w-full max-w-md rounded-2xl border border-[#f7d1cd] bg-[#fffcf7] p-5 shadow-[8px_12px_40px_rgba(45,52,54,0.2)]">
             <h3 className="text-base font-bold text-[#a9332a]">Warning</h3>
@@ -940,6 +955,7 @@ export function StaffSectionPage({
                 type="button"
                 onClick={() => setConfirmDelete(null)}
                 className="rounded-full bg-[#faf7f0] px-4 py-1.5 text-xs font-semibold text-[#636e72] ring-1 ring-[#ebe4d9]"
+                title="Cancel deletion"
               >
                 Cancel
               </button>
@@ -978,6 +994,7 @@ export function StaffSectionPage({
               }
             }}
             className="rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+            title={section === "teaching" ? "Add Teaching Staff" : "Add Non-Teaching Staff"}
           >
             {section === "teaching" ? "Add Staff" : "Add Non Staff"}
           </button>
@@ -1093,6 +1110,7 @@ export function StaffSectionPage({
                   type="button"
                   onClick={() => setSelectedTeachingProfile(null)}
                   className="mr-6 mt-4 rounded-xl border border-slate-200 bg-white px-4 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900"
+                  title="Close profile view"
                 >
                   Close
                 </button>
@@ -1137,6 +1155,7 @@ export function StaffSectionPage({
                     setShowTeachingForm(true);
                   }}
                   className="rounded-xl border border-slate-200 bg-white px-6 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-indigo-600"
+                  title="Edit this staff profile"
                 >
                   Edit
                 </button>
@@ -1146,6 +1165,7 @@ export function StaffSectionPage({
                     setConfirmDelete({ kind: "teaching", item: selectedTeachingProfile });
                   }}
                   className="rounded-xl border border-rose-200 bg-rose-50 px-6 py-2.5 text-sm font-semibold text-rose-700 shadow-sm transition hover:bg-rose-100"
+                  title="Delete this staff record"
                 >
                   Delete
                 </button>
@@ -1163,10 +1183,15 @@ export function StaffSectionPage({
                 setEditingNonTeachingStaff(null);
               }}
               initialData={editingNonTeachingStaff}
-              onSave={(staff) => {
-                void (editingNonTeachingStaff ? updateNonTeachingStaff(staff) : createNonTeachingStaff(staff)).catch((e) =>
-                  setStaffError(e instanceof Error ? e.message : "Failed to save staff"),
-                );
+              onSave={async (staff) => {
+                setStaffError(null);
+                try {
+                  if (editingNonTeachingStaff) await updateNonTeachingStaff(staff);
+                  else await createNonTeachingStaff(staff);
+                } catch (e) {
+                  setStaffError(e instanceof Error ? e.message : "Failed to save staff");
+                  throw e;
+                }
               }}
             />
           ) : null}
@@ -1259,6 +1284,7 @@ export function StaffSectionPage({
                   type="button"
                   onClick={() => setSelectedNonTeachingProfile(null)}
                   className="mr-6 mt-4 rounded-xl border border-slate-200 bg-white px-4 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900"
+                  title="Close profile view"
                 >
                   Close
                 </button>
@@ -1293,6 +1319,7 @@ export function StaffSectionPage({
                     setShowNonTeachingForm(true);
                   }}
                   className="rounded-xl border border-slate-200 bg-white px-6 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-indigo-600"
+                  title="Edit this staff profile"
                 >
                   Edit
                 </button>
@@ -1302,6 +1329,7 @@ export function StaffSectionPage({
                     setConfirmDelete({ kind: "nonTeaching", item: selectedNonTeachingProfile });
                   }}
                   className="rounded-xl border border-rose-200 bg-rose-50 px-6 py-2.5 text-sm font-semibold text-rose-700 shadow-sm transition hover:bg-rose-100"
+                  title="Delete this staff record"
                 >
                   Delete
                 </button>

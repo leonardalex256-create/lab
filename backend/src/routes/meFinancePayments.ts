@@ -12,6 +12,8 @@ import {
   User,
 } from "../models/index.js";
 import { calculatePaymentSummary } from "../services/pythonCalc.js";
+import { loadOfficialSchoolTermYear, resolveReadTermYearFromQuery } from "../lib/officialSchoolTermYear.js";
+import { dayRangeUtc } from "../lib/dateBounds.js";
 
 function trimStr(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
@@ -108,6 +110,9 @@ export function createMeFinancePaymentsRouter() {
       const amountPaidUgx = parseMoneyUgx(body.amountPaid);
       const requestedDue = parseMoneyUgx(body.amountDueUgx);
       const changeReason = trimStr(body.changeReason, 255);
+      const actor = req.userId ? await User.findByPk(req.userId, { attributes: ["fullName", "email"] }) : null;
+      const generatedByName =
+        actor?.fullName?.trim() || actor?.email?.split("@")[0] || "Account User";
 
 
       if (!Number.isFinite(studentId) || studentId < 1) {
@@ -121,6 +126,14 @@ export function createMeFinancePaymentsRouter() {
       if (amountPaidUgx == null || amountPaidUgx <= 0) {
         return res.status(400).json({ error: "amountPaid must be greater than zero" });
       }
+
+      const official = await loadOfficialSchoolTermYear();
+      if (term !== official.term) {
+        return res.status(400).json({
+          error: `Fees must be recorded for the school's current term (${official.term}). Update Settings → Current term or switch the payment form to match.`,
+        });
+      }
+      const academicYear = official.academicYear;
 
       const student = await Student.findByPk(studentId, {
         include: [{ model: ClassRoom, as: "classRoom", required: false }],
@@ -138,7 +151,7 @@ export function createMeFinancePaymentsRouter() {
       const createdReceipt = await sequelize.transaction(async (t) => {
         if (requestedDue != null && requestedDue > 0) {
           const [assignment] = await StudentFeeAssignment.findOrCreate({
-            where: { studentId, term },
+            where: { studentId, term, academicYear },
             defaults: { amountDueUgx: requestedDue, notes: null },
             transaction: t,
           });
@@ -150,7 +163,7 @@ export function createMeFinancePaymentsRouter() {
           }
         }
         const assignment = await StudentFeeAssignment.findOne({
-          where: { studentId, term },
+          where: { studentId, term, academicYear },
           transaction: t,
         });
         const boardingStatus = normalizeBoardingStatus(student.boardingStatus);
@@ -174,6 +187,7 @@ export function createMeFinancePaymentsRouter() {
             {
               studentId,
               term,
+              academicYear,
               amountDueUgx: discountedAmount,
               notes:
                 percentage > 0
@@ -184,7 +198,7 @@ export function createMeFinancePaymentsRouter() {
           );
         }
         const sumRaw = await StudentFeePayment.sum("amount_paid_ugx", {
-          where: { studentId, term },
+          where: { studentId, term, academicYear },
           transaction: t,
         });
         const previousPaidUgx = Math.max(Number(sumRaw ?? 0) || 0, 0);
@@ -207,6 +221,7 @@ export function createMeFinancePaymentsRouter() {
           {
             studentId,
             receiptNo: "PENDING",
+            academicYear,
             term,
             paymentMethod,
             paidBy,
@@ -229,6 +244,7 @@ export function createMeFinancePaymentsRouter() {
           {
             studentId,
             term,
+            academicYear,
             amountPaidUgx,
             paymentMethod,
             paidBy,
@@ -251,6 +267,7 @@ export function createMeFinancePaymentsRouter() {
             (createdReceipt.get("created_at") as Date | string | undefined) ??
             new Date().toISOString(),
           term: createdReceipt.term,
+          academicYear: createdReceipt.academicYear,
           paymentMethod: createdReceipt.paymentMethod,
           paidBy: createdReceipt.paidBy,
           amountPaid: Number(createdReceipt.amountPaidUgx),
@@ -258,6 +275,7 @@ export function createMeFinancePaymentsRouter() {
           totalFeesDue: Number(createdReceipt.totalFeesDueUgx),
           outstandingAfter: Number(createdReceipt.outstandingAfterUgx),
           creditAmount: Number(createdReceipt.creditAmountUgx),
+          generatedByName,
           student: studentToApiRow(student),
         },
       });
@@ -286,6 +304,7 @@ export function createMeFinancePaymentsRouter() {
             (receipt.get("created_at") as Date | string | undefined) ??
             new Date().toISOString(),
           term: receipt.term,
+          academicYear: receipt.academicYear,
           paymentMethod: receipt.paymentMethod,
           paidBy: receipt.paidBy,
           amountPaid: Number(receipt.amountPaidUgx),
@@ -305,12 +324,14 @@ export function createMeFinancePaymentsRouter() {
   r.get("/finance/receipts", async (req, res) => {
     try {
       const studentIdRaw = Number(req.query.studentId);
-      const termRaw = typeof req.query.term === "string" ? req.query.term.trim() : "";
+      const { term: termFilter, academicYear } = await resolveReadTermYearFromQuery(req.query);
       const lim = Number.parseInt(String(req.query.limit ?? "50"), 10);
       const limit = Number.isFinite(lim) ? Math.max(1, Math.min(200, lim)) : 50;
-      const where: Record<string, unknown> = {};
+      const offRaw = Number.parseInt(String(req.query.offset ?? "0"), 10);
+      const offset = Number.isFinite(offRaw) ? Math.max(0, offRaw) : 0;
+      const where: Record<string, unknown> = { academicYear, term: termFilter };
       if (Number.isFinite(studentIdRaw) && studentIdRaw > 0) where.studentId = studentIdRaw;
-      if (termRaw) where.term = termRaw;
+      const total = await StudentFeeReceipt.count({ where });
       const rows = await StudentFeeReceipt.findAll({
         where,
         include: [
@@ -323,8 +344,10 @@ export function createMeFinancePaymentsRouter() {
         ],
         order: [["created_at", "DESC"]],
         limit,
+        offset,
       });
       return res.json({
+        total,
         items: rows.map((x) => {
           const student = x.get("student") as Student | null | undefined;
           const studentRow = student ? studentToApiRow(student) : null;
@@ -337,11 +360,13 @@ export function createMeFinancePaymentsRouter() {
               new Date().toISOString(),
             studentId: x.studentId,
             term: x.term,
+            academicYear: x.academicYear,
             amountPaid: Number(x.amountPaidUgx),
             paymentMethod: x.paymentMethod,
             paidBy: x.paidBy,
             studentName: studentRow?.fullName ?? "Unknown student",
             className: studentRow?.className ?? "—",
+            isVoided: false,
           };
         }),
       });
@@ -357,11 +382,9 @@ export function createMeFinancePaymentsRouter() {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) {
         return res.status(400).json({ error: "Invalid date" });
       }
-      const start = `${dateRaw} 00:00:00`;
-      const end = `${dateRaw} 23:59:59`;
       const rows = await StudentFeeReceipt.findAll({
         where: {
-          createdAt: { [Op.between]: [start, end] },
+          createdAt: { [Op.between]: dayRangeUtc(dateRaw) },
         },
         order: [["created_at", "ASC"]],
       });

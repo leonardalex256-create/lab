@@ -86,7 +86,7 @@ export function RegisterPage({ loading, error, onBackToLogin, onRegister }: Regi
             <input
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => setEmail(e.target.value.toLowerCase())}
               disabled={loading}
               placeholder="Email"
               className="neo-inset h-11 rounded-xl px-4 text-sm outline-none"

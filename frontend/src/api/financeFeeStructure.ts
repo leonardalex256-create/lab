@@ -5,7 +5,8 @@ export type FeeStructureRow = {
   label: string;
   amountDueUgx: number;
   notes: string | null;
-  isSystem: boolean;
+  /** Deprecated: kept for older responses; fee rows are admin-defined only */
+  isSystem?: boolean;
 };
 
 async function readJson<T>(res: Response): Promise<T> {

@@ -30,9 +30,9 @@ export function ParentsSectionPage() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void fetchStudents({ limit: 500, sortBy: "name", sortDir: "asc" })
-      .then((rows) => {
-        if (!cancelled) setItems(rows);
+    void fetchStudents({ limit: 200, sortBy: "name", sortDir: "asc" })
+      .then((response) => {
+        if (!cancelled) setItems(response.items);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load");

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Welcome — Set Your Password</title>
+  <style>
+    body { font-family: 'Segoe UI', Arial, sans-serif; background: #f5f7fb; margin: 0; padding: 24px; }
+    .container { max-width: 540px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+    .header { background: linear-gradient(135deg, #065f46 0%, #059669 100%); padding: 32px 40px; text-align: center; }
+    .header h1 { color: #ffffff; font-size: 22px; margin: 0; font-weight: 700; }
+    .body { padding: 40px; color: #374151; line-height: 1.7; }
+    .body p { margin: 0 0 16px; font-size: 15px; }
+    .role-badge { display: inline-block; background: #ecfdf5; color: #065f46; padding: 4px 12px; border-radius: 20px; font-weight: 600; font-size: 14px; margin-bottom: 16px; }
+    .cta-wrapper { text-align: center; margin: 32px 0; }
+    .cta-btn { display: inline-block; background: #059669; color: #ffffff !important; text-decoration: none; padding: 14px 36px; border-radius: 8px; font-weight: 700; font-size: 15px; }
+    .fine-print { font-size: 13px; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 20px; margin-top: 24px; }
+    .footer { background: #f9fafb; padding: 20px 40px; text-align: center; font-size: 12px; color: #9ca3af; border-top: 1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>{{school_name}}</h1>
+    </div>
+    <div class="body">
+      <p>Welcome!</p>
+      <p>Your <span class="role-badge">{{role}}</span> account has been created at <strong>{{school_name}}</strong>.</p>
+      <p>Please click below to set your password and activate your account.</p>
+      <div class="cta-wrapper">
+        <a href="{{set_password_url}}" class="cta-btn">Set My Password</a>
+      </div>
+      <div class="fine-print">
+        <p>This link expires in <strong>48 hours</strong>. After setting your password, you can log in at:<br/>
+        <a href="{{login_url}}" style="color:#059669;">{{login_url}}</a></p>
+        <p>If you did not expect this email, please contact the school administration.</p>
+      </div>
+    </div>
+    <div class="footer">
+      <p>{{school_name}} · {{school_address}}</p>
+    </div>
+  </div>
+</body>
+</html>

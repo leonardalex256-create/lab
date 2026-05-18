@@ -42,8 +42,10 @@ import {
   type CurriculumSection,
 } from "./components/curriculum/CurriculumSectionPage";
 import { NoticeBoardPage } from "./components/communication/NoticeBoardPage";
+import { AttendanceSectionPage } from "./components/attendance/AttendanceSectionPage";
+import { ResultsSectionPage } from "./components/results/ResultsSectionPage";
 import { formatShortAgo } from "./utils/formatShortAgo";
-import { HeadTeacherOverview } from "./dashboards/HeadTeacherOverview";
+import { TeacherOverview } from "./dashboards/TeacherOverview";
 import { DOSOverview } from "./dashboards/DOSOverview";
 import { AccountantOverview } from "./dashboards/AccountantOverview";
 import { AdminOverview } from "./dashboards/AdminOverview";
@@ -74,14 +76,20 @@ type PersistedViewState = {
     | "finance"
     | "classes"
     | "curriculum"
-    | "communication";
+    | "communication"
+    | "attendance"
+    | "results"
+    | "search";
   studentSection: StudentNavSection;
   staffSection: StaffNavSection;
   teachingSection: TeachingSection;
   nonTeachingCategory: NonTeachingCategory;
   financeSection: FinanceSection;
   classesSection: ClassesSection;
+  classesRosterClassId: number | null;
   curriculumSection: CurriculumSection;
+  attendanceSection: "list" | "take" | "reports";
+  resultsSection: "list" | "entry" | "transcript" | "report_cards";
   selectedClassName: string | null;
 };
 
@@ -97,7 +105,10 @@ function readPersistedViewState(): PersistedViewState | null {
       parsed.mainView === "finance" ||
       parsed.mainView === "classes" ||
       parsed.mainView === "curriculum" ||
-      parsed.mainView === "communication"
+      parsed.mainView === "communication" ||
+      parsed.mainView === "attendance" ||
+      parsed.mainView === "results" ||
+      parsed.mainView === "search"
         ? parsed.mainView
         : "dashboard";
     const studentSection =
@@ -134,22 +145,34 @@ function readPersistedViewState(): PersistedViewState | null {
       parsed.financeSection === "assign_fees" ||
       parsed.financeSection === "record_payment" ||
       parsed.financeSection === "receipts" ||
-      parsed.financeSection === "bursery" ||
-      parsed.financeSection === "busery" ||
+      parsed.financeSection === "expenses" ||
+      parsed.financeSection === "bursary" ||
+      parsed.financeSection === "bursary_assignment" ||
       parsed.financeSection === "staff_payment" ||
       parsed.financeSection === "finance_summary" ||
       parsed.financeSection === "overview"
         ? parsed.financeSection
-        : "overview";
+        : parsed.financeSection === "busery"
+          ? "bursary"
+          : parsed.financeSection === "bursery"
+            ? "expenses"
+            : "overview";
     const classesSection: ClassesSection =
       parsed.classesSection === "all_classes" ||
       parsed.classesSection === "sections_streams" ||
       parsed.classesSection === "class_students" ||
+      parsed.classesSection === "class_students_roster" ||
       parsed.classesSection === "class_teachers" ||
       parsed.classesSection === "class_categories" ||
       parsed.classesSection === "class_reports"
         ? parsed.classesSection
         : "all_classes";
+    const classesRosterClassId =
+      typeof parsed.classesRosterClassId === "number" &&
+      Number.isFinite(parsed.classesRosterClassId) &&
+      parsed.classesRosterClassId > 0
+        ? parsed.classesRosterClassId
+        : null;
     const curriculumSection: CurriculumSection =
       parsed.curriculumSection === "exams_dashboard" ||
       parsed.curriculumSection === "exam_bot" ||
@@ -162,6 +185,21 @@ function readPersistedViewState(): PersistedViewState | null {
         parsed.curriculumSection.startsWith("exam_type:"))
         ? parsed.curriculumSection
         : "exams_dashboard";
+
+    const attendanceSection =
+      parsed.attendanceSection === "take" ||
+      parsed.attendanceSection === "reports" ||
+      parsed.attendanceSection === "list"
+        ? parsed.attendanceSection
+        : "list";
+
+    const resultsSection =
+      parsed.resultsSection === "entry" ||
+      parsed.resultsSection === "transcript" ||
+      parsed.resultsSection === "report_cards" ||
+      parsed.resultsSection === "list"
+        ? parsed.resultsSection
+        : "list";
     const inboxScreen: InboxScreen =
       parsed.inboxScreen?.screen === "list" &&
       (parsed.inboxScreen.kind === "notifications" || parsed.inboxScreen.kind === "messages")
@@ -182,7 +220,10 @@ function readPersistedViewState(): PersistedViewState | null {
       nonTeachingCategory,
       financeSection,
       classesSection,
+      classesRosterClassId,
       curriculumSection,
+      attendanceSection,
+      resultsSection,
       selectedClassName:
         typeof parsed.selectedClassName === "string" ? parsed.selectedClassName : null,
     };
@@ -262,8 +303,8 @@ function hasPermission(
 
 function requiredPermissionForFinanceSection(section: FinanceSection): string | null {
   if (section === "assign_fees") return "finance_assign_fees";
-  if (section === "record_payment" || section === "receipts" || section === "bursery") return "finance_record_payments";
-  if (section === "busery" || section === "bursery_assignment") return "finance_bursary";
+  if (section === "record_payment" || section === "receipts" || section === "expenses") return "finance_record_payments";
+  if (section === "bursary" || section === "bursary_assignment") return "finance_bursary";
   if (section === "staff_payment") return "finance_staff_pay";
   if (section === "finance_summary") return "finance_summaries";
   if (section === "daily_report" || section === "debtors_report") return "finance_reports";
@@ -298,6 +339,7 @@ function requiredPermissionForClassSection(section: ClassesSection): string | nu
   if (section === "all_classes") return "classes_all";
   if (section === "sections_streams") return "classes_sections_streams";
   if (section === "class_students") return "classes_students";
+  if (section === "class_students_roster") return "classes_students";
   if (section === "class_teachers") return "classes_teachers";
   if (section === "class_categories") return "classes_categories";
   if (section === "class_reports") return "classes_reports";
@@ -348,7 +390,17 @@ export function Dashboard({
   const [dashLoading, setDashLoading] = useState(false);
   const [dashError, setDashError] = useState<string | null>(null);
   const [mainView, setMainView] = useState<
-    "dashboard" | "expenses" | "students" | "staff" | "finance" | "classes" | "curriculum" | "communication"
+    | "dashboard"
+    | "expenses"
+    | "students"
+    | "staff"
+    | "finance"
+    | "classes"
+    | "curriculum"
+    | "communication"
+    | "attendance"
+    | "results"
+    | "search"
   >(
     initialView?.mainView ?? "dashboard",
   );
@@ -370,8 +422,17 @@ export function Dashboard({
   const [classesSection, setClassesSection] = useState<ClassesSection>(
     initialView?.classesSection ?? "all_classes",
   );
+  const [classesRosterClassId, setClassesRosterClassId] = useState<number | null>(
+    initialView?.classesRosterClassId ?? null,
+  );
   const [curriculumSection, setCurriculumSection] = useState<CurriculumSection>(
     initialView?.curriculumSection ?? "exams_dashboard",
+  );
+  const [attendanceSection] = useState<"list" | "take" | "reports">(
+    initialView?.attendanceSection ?? "list",
+  );
+  const [resultsSection] = useState<"list" | "entry" | "transcript" | "report_cards">(
+    initialView?.resultsSection ?? "list",
   );
   const [selectedClassName] = useState<string | null>(
     initialView?.selectedClassName ?? null,
@@ -480,14 +541,17 @@ export function Dashboard({
         nonTeachingCategory,
         financeSection,
         classesSection,
+        classesRosterClassId,
         curriculumSection,
+        attendanceSection,
+        resultsSection,
         selectedClassName,
       };
       sessionStorage.setItem(DASHBOARD_VIEW_STATE_KEY, JSON.stringify(value));
     } catch {
       // Ignore storage failures (e.g. privacy mode/storage disabled).
     }
-  }, [settingsPanel, inboxScreen, mainView, studentSection, staffSection, teachingSection, nonTeachingCategory, financeSection, classesSection, curriculumSection, selectedClassName]);
+  }, [settingsPanel, inboxScreen, mainView, studentSection, staffSection, teachingSection, nonTeachingCategory, financeSection, classesSection, classesRosterClassId, curriculumSection, attendanceSection, resultsSection, selectedClassName]);
   return (
     <AdminLayout
       user={user}
@@ -570,6 +634,9 @@ export function Dashboard({
         setInboxScreen({ screen: "home" });
         setMainView("classes");
         setClassesSection(section);
+        if (section !== "class_students_roster") {
+          setClassesRosterClassId(null);
+        }
       }}
       onSelectFinanceSection={(section) => {
         if (!canAccessFinanceSection(user?.role, user?.permissions, section)) return;
@@ -654,11 +721,36 @@ export function Dashboard({
             user={user}
           />
         ) : mainView === "classes" ? (
-          <ClassesSectionPage section={classesSection} />
+          <ClassesSectionPage
+            section={classesSection}
+            rosterClassId={classesRosterClassId}
+            onOpenClassRoster={(classId) => {
+              setClassesSection("class_students_roster");
+              setClassesRosterClassId(classId);
+            }}
+            onCloseClassRoster={() => {
+              setClassesSection("class_students");
+              setClassesRosterClassId(null);
+            }}
+          />
         ) : mainView === "curriculum" ? (
           <CurriculumSectionPage section={curriculumSection} />
         ) : mainView === "communication" ? (
           <NoticeBoardPage user={user} />
+        ) : mainView === "attendance" ? (
+          <AttendanceSectionPage mode={attendanceSection === "take" ? "take" : "list"} />
+        ) : mainView === "results" ? (
+          <ResultsSectionPage
+            viewMode={
+              resultsSection === "entry"
+                ? "entry"
+                : resultsSection === "transcript"
+                  ? "transcript"
+                  : "list"
+            }
+            userRole={user?.role ?? null}
+            userPermissions={user?.permissions ?? []}
+          />
         ) : (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
             {profileError || dashError ? (
@@ -673,7 +765,7 @@ export function Dashboard({
             ) : overviewKind === "accountant" ? (
               <AccountantOverview dash={dash} loading={dashLoading} />
             ) : (
-              <HeadTeacherOverview dash={dash} loading={dashLoading} />
+              <TeacherOverview dash={dash} loading={dashLoading} />
             )}
           </div>
         )}

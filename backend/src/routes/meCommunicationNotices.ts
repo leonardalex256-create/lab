@@ -2,6 +2,7 @@ import { Router } from "express";
 import { Op } from "sequelize";
 import type { Config } from "../config.js";
 import { NoticeBoardEntry, NoticeBoardComment, User, StaffMember } from "../models/index.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 
 export function createMeCommunicationNoticesRouter() {
   const r = Router();
@@ -45,11 +46,11 @@ export function createMeCommunicationNoticesRouter() {
   });
 
   /** Add a notice (Admin only). */
-  r.post("/", async (req, res) => {
+  r.post("/", requirePermission("communication_notice"), async (req, res) => {
     try {
       const user = await User.findByPk(req.userId);
-      if (user?.role !== "admin") {
-        return res.status(403).json({ error: "Access denied. Admin only." });
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
 
       const { title, body, type, eventDate } = req.body;
@@ -78,11 +79,11 @@ export function createMeCommunicationNoticesRouter() {
   });
 
   /** Update a notice (Admin only). */
-  r.patch("/:id", async (req, res) => {
+  r.patch("/:id", requirePermission("communication_notice"), async (req, res) => {
     try {
       const user = await User.findByPk(req.userId);
-      if (user?.role !== "admin") {
-        return res.status(403).json({ error: "Access denied. Admin only." });
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
 
       const id = parseInt(req.params.id, 10);
@@ -105,11 +106,11 @@ export function createMeCommunicationNoticesRouter() {
   });
 
   /** Delete a notice (Admin only). */
-  r.delete("/:id", async (req, res) => {
+  r.delete("/:id", requirePermission("communication_notice"), async (req, res) => {
     try {
       const user = await User.findByPk(req.userId);
-      if (user?.role !== "admin") {
-        return res.status(403).json({ error: "Access denied. Admin only." });
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
 
       const id = parseInt(req.params.id, 10);

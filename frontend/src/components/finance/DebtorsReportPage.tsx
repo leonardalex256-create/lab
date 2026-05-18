@@ -1,14 +1,36 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTermContext } from "../../context/TermContext";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
 import { fetchDebtorsReport } from "../../api/financeDebtors";
 import { formatCurrencyUGX } from "./shared/financeFormat";
 import type { DebtorsPayload } from "./shared/financeTypes";
+import { ConfirmModal } from "./shared/ConfirmModal";
+import { useSchoolConfig } from "../../context/SchoolConfigContext";
 
 type ExportFormat = "excel" | "pdf";
 
+function formatBoardingStatus(status: string | null | undefined): string {
+  const s = (status ?? "").trim().toLowerCase();
+  if (!s) return "—";
+  if (s === "boarding") return "Boarding";
+  if (s === "day_full") return "Day (Full Day)";
+  if (s === "day_half") return "Day (Half Day)";
+  return status ?? "—";
+}
+
+function slugifyTerm(term: string): string {
+  return term
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "term";
+}
+
 export function DebtorsReportPage() {
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
+  const config = useSchoolConfig();
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedClass, setSelectedClass] = useState("all");
   const [exportFormat, setExportFormat] = useState<ExportFormat>("excel");
@@ -16,12 +38,18 @@ export function DebtorsReportPage() {
   const [data, setData] = useState<DebtorsPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    description: string;
+    variant: "danger" | "warning" | "info";
+    onConfirm: () => void;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void fetchDebtorsReport()
+    void fetchDebtorsReport(viewingTerm, viewingAcademicYear)
       .then((res) => {
         if (!cancelled) setData(res);
       })
@@ -34,7 +62,7 @@ export function DebtorsReportPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [viewingTerm, viewingAcademicYear]);
 
   const classOptions = useMemo(() => {
     if (!data) return [];
@@ -60,42 +88,99 @@ export function DebtorsReportPage() {
     () => filtered.reduce((acc, row) => acc + row.balance, 0),
     [filtered],
   );
+  const filteredAssigned = useMemo(
+    () => filtered.reduce((acc, row) => acc + row.totalFees, 0),
+    [filtered],
+  );
+  const filteredPaid = useMemo(
+    () => filtered.reduce((acc, row) => acc + row.totalPaid, 0),
+    [filtered],
+  );
 
   const handleExport = () => {
     if (!data || filtered.length === 0 || exporting) return;
     setExporting(true);
     try {
       const stamp = new Date().toISOString().slice(0, 10);
-      const classLabel = selectedClass === "all" ? "all-classes" : selectedClass.replace(/\s+/g, "-");
+      const termSlug = slugifyTerm(data.term);
 
       if (exportFormat === "excel") {
         const workbook = XLSX.utils.book_new();
-        const summarySheet = XLSX.utils.json_to_sheet([
-          {
-            Term: data.term,
-            Class: selectedClass === "all" ? "All classes" : selectedClass,
-            Students: filtered.length,
-            "Outstanding (UGX)": filteredOutstanding,
-          },
-        ]);
-        const rowsSheet = XLSX.utils.json_to_sheet(
-          filtered.map((row) => ({
-            "Admission No.": row.admissionNumber,
-            "Student Name": row.fullName,
-            Class: row.className,
-            "Total Fees (UGX)": row.totalFees,
-            "Amount Paid (UGX)": row.totalPaid,
-            "Balance Due (UGX)": row.balance,
-          })),
-        );
-        XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
-        XLSX.utils.book_append_sheet(workbook, rowsSheet, "Debtors");
-        XLSX.writeFile(workbook, `debtors-report-${classLabel}-${stamp}.xlsx`);
+        const rows = filtered.map((row) => {
+          const boardingStatus = formatBoardingStatus(
+            (row as { boardingStatus?: string | null }).boardingStatus ?? null,
+          );
+          const outstandingAmount = Math.max(0, Number(row.balance) || 0);
+          const creditAmount = Math.max(0, 0 - (Number(row.balance) || 0));
+          return [
+            row.admissionNumber,
+            row.fullName,
+            row.className,
+            boardingStatus,
+            Number(row.totalFees) || 0,
+            Number(row.totalPaid) || 0,
+            outstandingAmount,
+            creditAmount,
+            data.term,
+          ];
+        });
+        const totalsRow = [
+          "TOTALS",
+          "",
+          "",
+          "",
+          filteredAssigned,
+          filteredPaid,
+          filteredOutstanding,
+          rows.reduce((sum, row) => sum + Number(row[7] ?? 0), 0),
+          data.term,
+        ];
+        const sheetRows: Array<Array<string | number>> = [
+          [
+            "Admission Number",
+            "Student Name",
+            "Class",
+            "Boarding Status",
+            "Amount Assigned (UGX)",
+            "Total Paid (UGX)",
+            "Outstanding Balance (UGX)",
+            "Credit (UGX)",
+            "Term",
+          ],
+          ...rows,
+          totalsRow,
+        ];
+        const sheet = XLSX.utils.aoa_to_sheet(sheetRows);
+        sheet["!cols"] = [
+          { wch: 18 },
+          { wch: 28 },
+          { wch: 14 },
+          { wch: 18 },
+          { wch: 20 },
+          { wch: 18 },
+          { wch: 24 },
+          { wch: 14 },
+          { wch: 20 },
+        ];
+        const totalsRowIndex = sheetRows.length;
+        for (let col = 0; col <= 8; col += 1) {
+          const cellAddress = XLSX.utils.encode_cell({ r: totalsRowIndex - 1, c: col });
+          const cell = sheet[cellAddress];
+          if (cell) {
+            (cell as { s?: unknown }).s = {
+              font: { bold: true },
+              fill: { patternType: "solid", fgColor: { rgb: "F1F5F9" } },
+            };
+          }
+        }
+        const sheetName = `Debtors – ${data.term}`.slice(0, 31);
+        XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
+        XLSX.writeFile(workbook, `debtors_report_${termSlug}_${stamp}.xlsx`);
       } else {
         const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
         const pageWidth = doc.internal.pageSize.getWidth();
         doc.setFontSize(14);
-        doc.text("Debtors Report", 40, 36);
+        doc.text(`${config.schoolName} — Debtors Report`, 40, 36);
         doc.setFontSize(10);
         doc.text(`Term: ${data.term}`, 40, 54);
         doc.text(`Class: ${selectedClass === "all" ? "All classes" : selectedClass}`, 40, 68);
@@ -122,10 +207,15 @@ export function DebtorsReportPage() {
             5: { halign: "right" },
           },
         });
-        doc.save(`debtors-report-${classLabel}-${stamp}.pdf`);
+        doc.save(`debtors-report-${termSlug}-${stamp}.pdf`);
       }
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to export debtors report");
+      setConfirmModal({
+        title: "Export failed",
+        description: e instanceof Error ? e.message : "Failed to export debtors report",
+        variant: "warning",
+        onConfirm: () => setConfirmModal(null),
+      });
     } finally {
       setExporting(false);
     }
@@ -164,6 +254,17 @@ export function DebtorsReportPage() {
           <p className="text-sm font-semibold text-[#b84040]">{error}</p>
         </div>
       ) : null}
+
+      <ConfirmModal
+        open={!!confirmModal}
+        title={confirmModal?.title ?? ""}
+        description={confirmModal?.description ?? ""}
+        variant={confirmModal?.variant ?? "warning"}
+        confirmLabel="OK"
+        cancelLabel="Dismiss"
+        onConfirm={confirmModal?.onConfirm ?? (() => undefined)}
+        onCancel={() => setConfirmModal(null)}
+      />
 
       <div className="neo-card overflow-hidden p-0 shadow-xl">
         {/* Search Bar Header */}
@@ -232,7 +333,7 @@ export function DebtorsReportPage() {
                 <th className="px-6 py-4">STUDENT NAME</th>
                 <th className="px-6 py-3 text-center">CLASS</th>
                 <th className="px-6 py-3 text-right">TOTAL FEES</th>
-                <th className="px-6 py-3 text-right">AMOUNT PAID</th>
+                <th className="px-6 py-3 text-right">TOTAL PAID</th>
                 <th className="px-6 py-3 text-right">BALANCE DUE</th>
                 <th className="px-6 py-3 text-center">ACTION</th>
               </tr>
@@ -254,7 +355,7 @@ export function DebtorsReportPage() {
                   <td className="px-6 py-4 text-right text-xs font-semibold text-[#636e72]">
                     {formatCurrencyUGX(d.totalFees)}
                   </td>
-                  <td className="px-6 py-4 text-right text-xs font-bold text-[#27ae60]">
+                  <td className="px-6 py-4 text-right text-xs font-bold text-[#15803d]">
                     {formatCurrencyUGX(d.totalPaid)}
                   </td>
                   <td className="px-6 py-4 text-right text-sm font-black text-[#dc2626]">
@@ -279,6 +380,25 @@ export function DebtorsReportPage() {
                 </tr>
               )}
             </tbody>
+            {filtered.length > 0 ? (
+              <tfoot>
+                <tr className="bg-[#f1f5f9]">
+                  <td className="px-6 py-4 text-xs font-black text-[#0f172a]" colSpan={3}>
+                    TOTALS
+                  </td>
+                  <td className="px-6 py-4 text-right text-xs font-black text-[#0f172a]">
+                    {formatCurrencyUGX(filteredAssigned)}
+                  </td>
+                  <td className="px-6 py-4 text-right text-xs font-black text-[#15803d]">
+                    {formatCurrencyUGX(filteredPaid)}
+                  </td>
+                  <td className="px-6 py-4 text-right text-xs font-black text-[#b91c1c]">
+                    {formatCurrencyUGX(filteredOutstanding)}
+                  </td>
+                  <td className="px-6 py-4" />
+                </tr>
+              </tfoot>
+            ) : null}
           </table>
         </div>
       </div>

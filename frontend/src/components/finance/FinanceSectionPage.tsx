@@ -10,6 +10,7 @@ import { PayrollSummaryPage } from "./payroll/PayrollSummaryPage";
 import { AdminDailyReportsPage } from "./reports/AdminDailyReportsPage";
 import { DebtorsReportPage } from "./reports/DebtorsReportPage";
 import { AssignBursaryPage } from "./AssignBursaryPage";
+import { FeeComplianceBanner } from "./FeeComplianceBanner";
 
 export type FinanceSection =
   | "overview"
@@ -71,22 +72,6 @@ export function FinanceSectionPage({
     onChangeSection("daily_report");
   };
 
-  const cards: Array<{ key: FinanceSection; desc: string; icon: string; color: string }> = [
-    { key: "record_payment", desc: "Record payments and print DB-backed receipts.", icon: "💳", color: "from-[#eef2f7] to-[#e0e7f1]" },
-    { key: "receipts", desc: "View, reopen, and print all saved receipts.", icon: "🧾", color: "from-[#f8fbff] to-[#e8f0ff]" },
-    { key: "assign_fees", desc: "Assign and adjust student term fees for accountants.", icon: "🧮", color: "from-[#eef7ff] to-[#dcecff]" },
-    { key: "daily_report", desc: "Track ledger entries for the selected day.", icon: "📚", color: "from-[#fdfcfb] to-[#f4f1ee]" },
-    { key: "finance_summary", desc: "Run daily report submission and review flow.", icon: "📑", color: "from-[#f5fbf8] to-[#e8f5ed]" },
-    { key: "staff_payment", desc: "View payroll totals and arrears by month.", icon: "👥", color: "from-[#f8f9ff] to-[#e8ebf9]" },
-    { key: "bursary", desc: "Open the bursary management page.", icon: "🎓", color: "from-[#fff9f4] to-[#ffeadb]" },
-    { key: "expenses", desc: "Capture operational expenses into the school ledger.", icon: "🛒", color: "from-[#fff9f4] to-[#ffeadb]" },
-    { key: "debtors_report", desc: "Review student debtors and outstanding balances.", icon: "📉", color: "from-[#fff5f5] to-[#ffe8e8]" },
-  ];
-  const visibleCards = cards.filter((card) => {
-    const required = requiredPermissionForSection(card.key);
-    if (!required) return true;
-    return hasFinancePermission(user, required);
-  });
   const sectionRequiredPermission = requiredPermissionForSection(section);
   const sectionAllowed =
     section === "overview" ||
@@ -124,8 +109,9 @@ export function FinanceSectionPage({
   if (section === "record_payment") {
     return (
       <div className="min-w-0 space-y-4">
+        <FeeComplianceBanner />
         {renderHeader(sectionTitle.record_payment, "Capture fee payments and issue receipts.")}
-        <RecordStudentPaymentPage />
+        <RecordStudentPaymentPage generatedByName={user?.name || user?.email?.split("@")[0]} />
       </div>
     );
   }
@@ -133,6 +119,7 @@ export function FinanceSectionPage({
   if (section === "assign_fees") {
     return (
       <div className="min-w-0 space-y-4">
+        <FeeComplianceBanner />
         {renderHeader(sectionTitle.assign_fees, "Search students and assign term fee amounts.")}
         <AssignFeesPage />
       </div>
@@ -143,7 +130,7 @@ export function FinanceSectionPage({
     return (
       <div className="min-w-0 space-y-4">
         {renderHeader(sectionTitle.receipts, "Review all generated receipts and reprint when needed.")}
-        <ReceiptsHistoryPage />
+        <ReceiptsHistoryPage generatedByName={user?.name || user?.email?.split("@")[0]} />
       </div>
     );
   }
@@ -169,6 +156,7 @@ export function FinanceSectionPage({
   if (section === "debtors_report") {
     return (
       <div className="min-w-0 space-y-4">
+        <FeeComplianceBanner />
         {renderHeader(sectionTitle.debtors_report, "Monitor students with outstanding fee balances.")}
         <DebtorsReportPage />
       </div>
@@ -237,51 +225,7 @@ export function FinanceSectionPage({
 
   return (
     <div className="min-w-0 space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
-      <header className="flex flex-col gap-2 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-        <div className="flex items-center gap-4">
-          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-50 text-2xl text-indigo-600 shadow-inner ring-1 ring-indigo-100">
-            💳
-          </div>
-          <div>
-            <h1 className="text-2xl font-black tracking-tight text-slate-800">
-              Finance Command Center
-            </h1>
-            <p className="mt-1 text-sm font-medium text-slate-500">
-              Oversee school revenue, track student fee balances, and manage financial documentation.
-            </p>
-          </div>
-        </div>
-      </header>
-
-      <section className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-        {visibleCards.map((card) => (
-          <button
-            key={card.key}
-            type="button"
-            onClick={() => onChangeSection(card.key)}
-            className="group relative flex flex-col rounded-3xl border border-slate-200 bg-white p-6 shadow-sm transition-all hover:-translate-y-1 hover:shadow-md"
-          >
-            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-50 text-2xl shadow-inner ring-1 ring-slate-100 transition-colors group-hover:bg-indigo-50 group-hover:ring-indigo-100">
-              <span role="img" aria-label={card.key}>
-                {card.icon}
-              </span>
-            </div>
-            <h2 className="text-base font-bold text-slate-800 transition-colors group-hover:text-indigo-600">
-              {sectionTitle[card.key]}
-            </h2>
-            <p className="mt-2 text-xs leading-relaxed text-slate-500">
-              {card.desc}
-            </p>
-            <div className="mt-4 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-indigo-600 opacity-0 transition-opacity group-hover:opacity-100">
-              Open Module
-              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-              </svg>
-            </div>
-          </button>
-        ))}
-      </section>
-
+      <FeeComplianceBanner />
       <div className="pt-4 border-t border-[#ebe4d9]/50">
         <FinanceOverviewPage />
       </div>

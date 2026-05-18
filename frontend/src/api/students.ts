@@ -11,6 +11,33 @@ async function readJson<T>(res: Response): Promise<T> {
   return JSON.parse(text) as T;
 }
 
+export type RecentAdmissionRow = {
+  studentId: number;
+  admissionNumber: string;
+  studentName: string;
+  className: string | null;
+  sectionName: string | null;
+  admittedAtLabel: string;
+  status: "Active" | "Pending" | string;
+};
+
+export async function fetchRecentAdmissions(
+  term: string,
+  academicYear: string,
+): Promise<RecentAdmissionRow[]> {
+  const q = new URLSearchParams({ term, academicYear });
+  const res = await fetch(apiUrl(`/api/me/students/recent-admissions?${q.toString()}`), {
+    headers: { ...authHeaders() },
+  });
+  if (res.status === 401) throw new Error("Unauthorized");
+  if (!res.ok) {
+    const err = await readJson<{ error?: string }>(res).catch(() => null);
+    throw new Error(err?.error ?? "Request failed");
+  }
+  const data = await readJson<{ items: RecentAdmissionRow[] }>(res);
+  return data.items;
+}
+
 export type StudentApiRow = {
   id: number;
   admissionNumber: string;
@@ -85,7 +112,7 @@ export type TeacherOption = {
   displayName: string;
 };
 
-export type StudentSortBy = "date" | "id" | "name" | "class";
+export type StudentSortBy = "date" | "id" | "name" | "class" | "boarding";
 export type StudentSortDir = "asc" | "desc";
 
 export async function fetchStudents(opts: StudentListQueryInput): Promise<{ items: StudentApiRow[]; total: number }> {
@@ -94,6 +121,14 @@ export async function fetchStudents(opts: StudentListQueryInput): Promise<{ item
   if (query) p.set("q", query);
   p.set("sortBy", opts.sortBy ?? "date");
   p.set("sortDir", opts.sortDir ?? "desc");
+  if (opts.classRoomId != null) p.set("classRoomId", String(opts.classRoomId));
+  if (
+    opts.boardingStatus === "boarding" ||
+    opts.boardingStatus === "day_half" ||
+    opts.boardingStatus === "day_full"
+  ) {
+    p.set("boardingStatus", opts.boardingStatus);
+  }
   if (opts.limit != null) p.set("limit", String(opts.limit));
   if (opts.offset != null) p.set("offset", String(opts.offset));
   const res = await fetch(apiUrl(`/api/me/students?${p.toString()}`), {

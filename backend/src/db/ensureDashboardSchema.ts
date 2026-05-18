@@ -4,6 +4,8 @@ import type { Sequelize } from "sequelize";
 const MYSQL_DUP_FIELDNAME = 1060;
 /** MySQL ER_CANT_DROP_FIELD_OR_KEY — column does not exist (or index) */
 const MYSQL_CANT_DROP_FIELD_OR_KEY = 1091;
+/** MySQL ER_DUP_KEYNAME — index already exists */
+const MYSQL_DUP_KEYNAME = 1061;
 
 async function addColumnIfMissing(
   sequelize: Sequelize,
@@ -29,6 +31,38 @@ async function dropColumnIfExists(
   try {
     await sequelize.query(sql);
     console.info(`[db] Dropped column ${label}`);
+  } catch (e: unknown) {
+    const errno = (e as { parent?: { errno?: number } })?.parent?.errno;
+    if (errno !== MYSQL_CANT_DROP_FIELD_OR_KEY) {
+      throw e;
+    }
+  }
+}
+
+async function addIndexIfMissing(
+  sequelize: Sequelize,
+  sql: string,
+  label: string,
+): Promise<void> {
+  try {
+    await sequelize.query(sql);
+    console.info(`[db] Added index ${label}`);
+  } catch (e: unknown) {
+    const errno = (e as { parent?: { errno?: number } })?.parent?.errno;
+    if (errno !== MYSQL_DUP_KEYNAME) {
+      throw e;
+    }
+  }
+}
+
+async function dropIndexIfExists(
+  sequelize: Sequelize,
+  sql: string,
+  label: string,
+): Promise<void> {
+  try {
+    await sequelize.query(sql);
+    console.info(`[db] Dropped index ${label}`);
   } catch (e: unknown) {
     const errno = (e as { parent?: { errno?: number } })?.parent?.errno;
     if (errno !== MYSQL_CANT_DROP_FIELD_OR_KEY) {
@@ -208,6 +242,27 @@ export async function ensureDashboardSchema(sequelize: Sequelize): Promise<void>
     sequelize,
     "ALTER TABLE students ADD COLUMN bursary_ends_at DATETIME NULL",
     "students.bursary_ends_at",
+  );
+
+  await addIndexIfMissing(
+    sequelize,
+    "ALTER TABLE students ADD INDEX idx_students_admission_number (admission_number)",
+    "students.idx_students_admission_number",
+  );
+  await addIndexIfMissing(
+    sequelize,
+    "ALTER TABLE students ADD INDEX idx_students_class_section (class_room_id, section_name)",
+    "students.idx_students_class_section",
+  );
+  await addIndexIfMissing(
+    sequelize,
+    "ALTER TABLE students ADD INDEX idx_students_name_sort (last_name, first_name)",
+    "students.idx_students_name_sort",
+  );
+  await addIndexIfMissing(
+    sequelize,
+    "ALTER TABLE students ADD INDEX idx_students_created_at (created_at)",
+    "students.idx_students_created_at",
   );
 
   await sequelize.query(`
@@ -613,6 +668,7 @@ export async function ensureDashboardSchema(sequelize: Sequelize): Promise<void>
       class_category_id INT UNSIGNED NOT NULL,
       section_name VARCHAR(80) NOT NULL DEFAULT '',
       subject_name VARCHAR(120) NOT NULL,
+      short_form VARCHAR(8) NOT NULL DEFAULT '',
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (id),
       UNIQUE KEY uq_subject_assignment_category_section_subject (class_category_id, section_name, subject_name),
@@ -678,4 +734,58 @@ export async function ensureDashboardSchema(sequelize: Sequelize): Promise<void>
       CONSTRAINT fk_exams_classroom FOREIGN KEY (class_room_id) REFERENCES classrooms (id) ON DELETE CASCADE ON UPDATE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+
+  // --- Academic year on fee + assessment rows (operational period at save time) ---
+  const academicYearTables = [
+    "student_fee_assignments",
+    "student_fee_payments",
+    "student_fee_receipts",
+    "student_assessment_results",
+  ] as const;
+  for (const tbl of academicYearTables) {
+    await addColumnIfMissing(
+      sequelize,
+      `ALTER TABLE \`${tbl}\` ADD COLUMN academic_year VARCHAR(4) NULL`,
+      `${tbl}.academic_year`,
+    );
+  }
+
+  for (const tbl of academicYearTables) {
+    await sequelize.query(`
+      UPDATE \`${tbl}\` t
+      SET t.academic_year = COALESCE(
+        NULLIF(TRIM((SELECT setting_value FROM school_settings WHERE setting_key = 'academic_year' LIMIT 1)), ''),
+        '2026'
+      )
+      WHERE t.academic_year IS NULL
+    `);
+  }
+
+  for (const tbl of academicYearTables) {
+    await sequelize.query(
+      `ALTER TABLE \`${tbl}\` MODIFY COLUMN academic_year VARCHAR(4) NOT NULL`,
+    );
+  }
+
+  await dropIndexIfExists(
+    sequelize,
+    "ALTER TABLE student_assessment_results DROP INDEX uq_student_assessment_results_student_term_exam_subject",
+    "student_assessment_results.uq_student_assessment_results_student_term_exam_subject",
+  );
+  await addIndexIfMissing(
+    sequelize,
+    "ALTER TABLE student_assessment_results ADD UNIQUE KEY uq_student_assessment_results_student_year_term_exam_subject (student_id, academic_year, term, exam_type, subject)",
+    "student_assessment_results.uq_student_assessment_results_student_year_term_exam_subject",
+  );
+  await addIndexIfMissing(
+    sequelize,
+    "ALTER TABLE student_assessment_results ADD KEY student_assessment_results_year_term_class_idx (academic_year, term, class_room_id)",
+    "student_assessment_results.student_assessment_results_year_term_class_idx",
+  );
+
+  await addIndexIfMissing(
+    sequelize,
+    "ALTER TABLE student_fee_assignments ADD UNIQUE KEY uq_student_fee_assignments_student_year_term (student_id, academic_year, term)",
+    "student_fee_assignments.uq_student_fee_assignments_student_year_term",
+  );
 }

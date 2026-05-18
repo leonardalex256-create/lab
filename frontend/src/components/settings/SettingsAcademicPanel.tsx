@@ -141,6 +141,7 @@ export function SettingsAcademicPanel() {
           <button
             onClick={addRule}
             className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-indigo-200 transition-all hover:bg-indigo-700 hover:shadow-indigo-300"
+            title="Define a new grading threshold rule"
           >
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
@@ -200,6 +201,7 @@ export function SettingsAcademicPanel() {
                         <button
                           onClick={() => removeRule(idx)}
                           className="rounded-xl p-2 text-rose-500 opacity-0 transition-all hover:bg-rose-50 hover:opacity-100 group-hover:opacity-40"
+                          title="Remove this grading rule"
                         >
                           <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -216,7 +218,7 @@ export function SettingsAcademicPanel() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                         </svg>
                         <p className="text-sm font-medium">No grading rules defined yet.</p>
-                        <button onClick={addRule} className="mt-2 text-xs font-bold uppercase tracking-widest text-indigo-600 hover:underline">Provision First Rule</button>
+                        <button onClick={addRule} className="mt-2 text-xs font-bold uppercase tracking-widest text-indigo-600 hover:underline" title="Initialize the grading scale with its first rule">Provision First Rule</button>
                       </div>
                     </td>
                   </tr>
@@ -249,6 +251,7 @@ export function SettingsAcademicPanel() {
                 }
               }}
               className="rounded-2xl bg-indigo-500/30 px-5 py-2.5 text-xs font-bold text-white hover:bg-indigo-500/50 transition-all"
+              title="Discard all unsaved grading changes"
             >
               Discard
             </button>
@@ -257,6 +260,7 @@ export function SettingsAcademicPanel() {
               disabled={saving || localThresholds.length === 0}
               onClick={onSave}
               className="rounded-2xl bg-white px-6 py-2.5 text-xs font-bold text-indigo-600 shadow-sm hover:bg-indigo-50 disabled:opacity-50 transition-all"
+              title="Finalize and save the grading system configuration"
             >
               {saving ? "Updating..." : "Save System"}
             </button>
@@ -271,7 +275,7 @@ export function SettingsAcademicPanel() {
           }`}>
             <span>{toast.type === "success" ? "✅" : "❌"}</span>
             <span>{toast.message}</span>
-            <button onClick={() => setToast(null)} className="ml-2 rounded-full p-1 opacity-70 hover:bg-black/5 hover:opacity-100 transition">
+            <button onClick={() => setToast(null)} className="ml-2 rounded-full p-1 opacity-70 hover:bg-black/5 hover:opacity-100 transition" title="Dismiss this notification">
               <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>

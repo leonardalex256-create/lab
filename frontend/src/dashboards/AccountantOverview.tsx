@@ -4,20 +4,36 @@ import { fetchFinanceDashboard } from "../api/financeDashboard";
 import { type FinanceDashboardPayload } from "../components/finance/shared/financeTypes";
 import { formatCurrencyUGX } from "../components/finance/shared/financeFormat";
 import { useI18n } from "../i18n/I18nProvider";
+import { useTermContext } from "../context/TermContext";
 import { StatCard, DashboardSectionTitle } from "./OverviewShared";
 
 export function AccountantOverview({ dash, loading }: { dash: DashboardPayload | null, loading: boolean }) {
   const { t } = useI18n();
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
   const [fin, setFin] = useState<FinanceDashboardPayload | null>(null);
   const [finLoading, setFinLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     setFinLoading(true);
-    fetchFinanceDashboard()
-      .then(setFin)
-      .catch(console.error)
-      .finally(() => setFinLoading(false));
-  }, []);
+    setError(null);
+    void fetchFinanceDashboard(viewingTerm, viewingAcademicYear)
+      .then((data) => {
+        if (!cancelled) setFin(data);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Failed to load financial data");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setFinLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewingTerm, viewingAcademicYear]);
 
   if (loading && !dash) {
     return <div className="p-8 text-center animate-pulse text-[#636e72] font-semibold">Loading Financial Dashboard...</div>;
@@ -32,6 +48,11 @@ export function AccountantOverview({ dash, loading }: { dash: DashboardPayload |
         title={t("dashboard.accountantOverview")} 
         subtitle="Daily ledger, collections tracking, and expense summary" 
       />
+      {error ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm font-bold text-amber-900">
+          Financial data could not be loaded. {error}
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard

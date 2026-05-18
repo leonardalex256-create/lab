@@ -10,7 +10,7 @@ async function main() {
   const defaults = [
     // Accountant
     { role: "accountant", permissionKey: "nav_dashboard" },
-    { role: "accountant", permissionKey: "nav_finance" },
+    { role: "accountant", permissionKey: "nav_operations" },
     { role: "accountant", permissionKey: "nav_communication" },
     { role: "accountant", permissionKey: "nav_settings" },
 

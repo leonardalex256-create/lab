@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   createExamTypeConfig,
   createSubjectConfig,
@@ -8,6 +8,7 @@ import {
   fetchPerformanceSummary,
   fetchResultEntryOptions,
   fetchResultEntryStudents,
+  fetchSubjectAssignmentUsage,
   fetchSubjectConfigs,
   fetchStudentMarkEntry,
   generateClassMarksheet,
@@ -17,16 +18,29 @@ import {
   fetchExams,
   fetchGradingScales,
   saveStudentMarkEntry,
+  updateSubjectConfig,
   type ExamTypeConfigRow,
   type PerformanceSummaryRow,
   type ResultEntryOptions,
   type SubjectAssignmentConfigRow,
+  type SubjectConfigPayload,
   type UpcomingExamRow,
   type ExamPerformanceSummaryRow,
   type GeneratedMarksheetPayload,
   type GradingScaleRow,
 } from "../../api/academics";
 import { useTheme } from "../../theme/ThemeProvider";
+import { useTermContext } from "../../context/TermContext";
+
+/** Dispatched to open Subject & Examination Configuration on the Scheduling tab (see dashboards/Dashboard listener). */
+export const CURRICULUM_OPEN_SUBJECTS_SCHEDULE_EVENT = "curriculum:open-subjects-schedule";
+export const SUBJECTS_CONFIG_TAB_STORAGE_KEY = "subjectsConfigInitialTab";
+
+let subjectConfigsCachedPromise: Promise<SubjectConfigPayload> | null = null;
+function getSubjectConfigsCached(): Promise<SubjectConfigPayload> {
+  subjectConfigsCachedPromise ??= fetchSubjectConfigs();
+  return subjectConfigsCachedPromise;
+}
 
 export type CurriculumSection =
   | "exams_dashboard"
@@ -63,222 +77,380 @@ function titleForSection(section: CurriculumSection): string {
   return "Subjects & Exam Settings";
 }
 
+function daysFromTodayStart(ymd: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+  const [y, m, d] = ymd.split("-").map((x) => Number(x));
+  const examDay = new Date(y, m - 1, d);
+  if (Number.isNaN(examDay.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  examDay.setHours(0, 0, 0, 0);
+  return Math.round((examDay.getTime() - today.getTime()) / 86400000);
+}
+
+function assessmentStatusMeta(days: number | null): { label: string; pillClass: string; dotClass: string } {
+  if (days != null && days >= 0 && days <= 3) {
+    return {
+      label: "Soon",
+      pillClass: "bg-amber-50 text-amber-900 ring-amber-200/90",
+      dotClass: "bg-amber-500",
+    };
+  }
+  if (days != null && days >= 0 && days <= 7) {
+    return {
+      label: "This Week",
+      pillClass: "bg-blue-50 text-blue-900 ring-blue-200/90",
+      dotClass: "bg-blue-500",
+    };
+  }
+  return {
+    label: "Scheduled",
+    pillClass: "bg-slate-50 text-slate-800 ring-slate-200/90",
+    dotClass: "bg-slate-400",
+  };
+}
+
+function examTypeStripAccent(examKey: string): string {
+  const k = examKey.trim().toUpperCase();
+  if (k === "BOT") return "border-l-[#3b82f6]";
+  if (k === "MID") return "border-l-[#f59e0b]";
+  if (k === "EOT") return "border-l-[#10b981]";
+  return "border-l-slate-400";
+}
+
 function ExamsDashboardPage() {
-  const [term, setTerm] = useState("Term 1");
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [upcomingExams, setUpcomingExams] = useState<UpcomingExamRow[]>([]);
   const [performanceSummary, setPerformanceSummary] = useState<ExamPerformanceSummaryRow[]>([]);
   const [examTypes, setExamTypes] = useState<ExamTypeConfigRow[]>([]);
+  const loadRequestId = useRef(0);
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadDashboard = useCallback(async () => {
+    const reqId = ++loadRequestId.current;
     setLoading(true);
     setError(null);
-    
-    Promise.all([
-      fetchUpcomingExams(),
-      fetchExamsPerformanceSummary(term),
-      fetchExamTypeConfigs()
-    ]).then(([upcoming, performance, types]) => {
-      if (cancelled) return;
+    try {
+      const [upcoming, performance, types] = await Promise.all([
+        fetchUpcomingExams(),
+        fetchExamsPerformanceSummary(viewingTerm, viewingAcademicYear),
+        fetchExamTypeConfigs(),
+      ]);
+      if (reqId !== loadRequestId.current) return;
       setUpcomingExams(upcoming);
       setPerformanceSummary(performance);
-      setExamTypes(types.filter(t => t.isActive));
-    }).catch(e => {
-      if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load dashboard data");
-    }).finally(() => {
-      if (!cancelled) setLoading(false);
-    });
+      setExamTypes(types.filter((t) => t.isActive));
+    } catch (e) {
+      if (reqId !== loadRequestId.current) return;
+      setError(e instanceof Error ? e.message : "Failed to load dashboard data");
+    } finally {
+      if (reqId === loadRequestId.current) setLoading(false);
+    }
+  }, [viewingTerm, viewingAcademicYear]);
 
-    return () => { cancelled = true; };
-  }, [term]);
+  useEffect(() => {
+    void loadDashboard();
+  }, [loadDashboard]);
+
+  const retry = useCallback(() => {
+    void loadDashboard();
+  }, [loadDashboard]);
 
   const globalAvg = useMemo(() => {
     if (performanceSummary.length === 0) return 0;
     return performanceSummary.reduce((sum, r) => sum + Number(r.avgScore), 0) / performanceSummary.length;
   }, [performanceSummary]);
 
+  const termProgressPct = useMemo(() => {
+    // TODO: Replace with real academic-calendar-based term progress when that data is available.
+    return Math.min(Math.round(upcomingExams.length > 0 ? 40 : 70), 100);
+  }, [upcomingExams.length]);
+
+  const sortedPerformance = useMemo(
+    () => [...performanceSummary].sort((a, b) => Number(b.avgScore) - Number(a.avgScore)),
+    [performanceSummary],
+  );
+
+  function openScheduleAssessment() {
+    try {
+      sessionStorage.setItem(SUBJECTS_CONFIG_TAB_STORAGE_KEY, "schedule");
+    } catch {
+      /* ignore */
+    }
+    window.dispatchEvent(new Event(CURRICULUM_OPEN_SUBJECTS_SCHEDULE_EVENT));
+  }
+
   return (
     <div className="animate-in fade-in slide-in-from-bottom-4 space-y-8 duration-700">
-      <header className="flex flex-col justify-between gap-4 border-b border-[#ebe4d9]/80 pb-6 sm:flex-row sm:items-center">
-        <div>
-          <h1 className="text-3xl font-black tracking-tight text-[#2d3436]">Academic Command Center</h1>
-          <p className="mt-1 text-sm font-semibold text-[#636e72]">Real-time academic performance & institutional oversight.</p>
+      <header className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-6 sm:flex-row sm:items-start">
+        <div className="min-w-0 border-l-4 border-[#0f172a] pl-4">
+          <h1 className="text-2xl font-black tracking-tight text-slate-900">Examination Control Centre</h1>
+          <p className="mt-1 text-sm font-medium text-slate-500">
+            Academic Year {viewingAcademicYear} · {viewingTerm}
+          </p>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Term:</span>
-            <select
-              value={term}
-              onChange={(e) => setTerm(e.target.value)}
-              className="neo-inset-field rounded-full px-5 py-2.5 text-sm font-black text-[#2d3436] outline-none"
-            >
-              <option value="Term 1">Term 1</option>
-              <option value="Term 2">Term 2</option>
-              <option value="Term 3">Term 3</option>
-            </select>
+        <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
+          <div className="inline-flex items-center gap-2 rounded-full bg-[#0f172a] px-4 py-2 text-sm font-semibold text-white">
+            <svg className="h-4 w-4 shrink-0 opacity-90" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+            <span>{viewingTerm}</span>
           </div>
-          <button className="group flex items-center gap-2 rounded-full bg-gradient-to-br from-[#3498db] to-[#2980b9] px-6 py-3 text-sm font-black text-white shadow-xl transition hover:brightness-110 active:scale-95">
-            <span>Print Executive Summary</span>
-            <svg className="h-4 w-4 transition-transform group-hover:rotate-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/>
+          <div className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700">
+            {viewingAcademicYear}
+          </div>
+          <button
+            type="button"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-50"
+            title="Print executive summary"
+            aria-label="Print executive summary"
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
             </svg>
           </button>
         </div>
       </header>
 
       {error ? (
-        <div className="neo-card border-l-4 border-red-500 p-4 text-sm font-bold text-red-700 shadow-md">{error}</div>
+        <div
+          className="flex flex-wrap items-center gap-4 rounded-lg border border-red-100 border-l-4 border-l-red-500 bg-red-50 px-4 py-3 text-sm text-red-800"
+          role="alert"
+        >
+          <svg className="h-5 w-5 shrink-0 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <span className="min-w-0 flex-1 font-medium">{error}</span>
+          <button
+            type="button"
+            onClick={() => retry()}
+            className="rounded-full border border-red-200 bg-white px-4 py-1.5 text-xs font-semibold text-red-700 shadow-sm hover:bg-red-50"
+          >
+            Retry
+          </button>
+        </div>
       ) : null}
 
-      {/* High Level Stats */}
-      <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
-        <div className="neo-card-elevated p-6">
-          <p className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Global Average</p>
-          <div className="mt-2 flex items-baseline gap-1">
-            <p className="text-3xl font-black text-[#2d3436]">{loading ? "—" : globalAvg.toFixed(1)}</p>
-            <span className="text-sm font-bold text-[#636e72]">%</span>
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <div className="rounded-2xl border border-slate-100 bg-white p-5">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-[#3b82f6]" aria-hidden />
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Global Average</p>
           </div>
-          <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-[#ebe4d9]/50">
-            <div className="h-full bg-[#3498db]" style={{ width: `${globalAvg}%` }}></div>
+          {loading ? (
+            <div className="mt-3 h-10 animate-pulse rounded bg-slate-100" />
+          ) : (
+            <p className="mt-2 text-4xl font-black tabular-nums text-slate-900">{globalAvg.toFixed(1)}%</p>
+          )}
+          <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full bg-gradient-to-r from-[#3b82f6] to-sky-400 transition-all duration-1000"
+              style={{ width: `${Math.min(globalAvg, 100)}%` }}
+            />
           </div>
         </div>
-        <div className="neo-card-elevated p-6">
-          <p className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Upcoming Exams</p>
-          <p className="mt-2 text-3xl font-black text-[#e67e22]">{loading ? "—" : upcomingExams.length}</p>
-          <p className="mt-1 text-[10px] font-bold text-[#636e72]">Next 7 Days</p>
+        <div className="rounded-2xl border border-slate-100 bg-white p-5">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-[#f59e0b]" aria-hidden />
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Upcoming Exams</p>
+          </div>
+          {loading ? (
+            <div className="mt-3 h-10 animate-pulse rounded bg-slate-100" />
+          ) : (
+            <p className="mt-2 text-4xl font-black tabular-nums text-slate-900">{upcomingExams.length}</p>
+          )}
+          <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full bg-gradient-to-r from-[#f59e0b] to-amber-300 transition-all duration-1000"
+              style={{ width: `${Math.min(upcomingExams.length * 12, 100)}%` }}
+            />
+          </div>
         </div>
-        <div className="neo-card-elevated p-6">
-          <p className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Active Classes</p>
-          <p className="mt-2 text-3xl font-black text-[#2ecc71]">{loading ? "—" : performanceSummary.length}</p>
-          <p className="mt-1 text-[10px] font-bold text-[#636e72]">Result Entry Active</p>
+        <div className="rounded-2xl border border-slate-100 bg-white p-5">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-[#10b981]" aria-hidden />
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Active Classes</p>
+          </div>
+          {loading ? (
+            <div className="mt-3 h-10 animate-pulse rounded bg-slate-100" />
+          ) : (
+            <p className="mt-2 text-4xl font-black tabular-nums text-slate-900">{performanceSummary.length}</p>
+          )}
+          <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full bg-gradient-to-r from-[#10b981] to-emerald-300 transition-all duration-1000"
+              style={{
+                width: `${performanceSummary.length === 0 ? 0 : Math.min(100, performanceSummary.length * 14)}%`,
+              }}
+            />
+          </div>
         </div>
-        <div className="neo-card-elevated p-6">
-          <p className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Term Progress</p>
-          <p className="mt-2 text-3xl font-black text-[#9b59b6]">{term === "Term 1" ? "35" : term === "Term 2" ? "65" : "90"}%</p>
-          <p className="mt-1 text-[10px] font-bold text-[#636e72]">Academic Calendar</p>
+        <div className="rounded-2xl border border-slate-100 bg-white p-5">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-[#8b5cf6]" aria-hidden />
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Term Progress</p>
+          </div>
+          {loading ? (
+            <div className="mt-3 h-10 animate-pulse rounded bg-slate-100" />
+          ) : (
+            <p className="mt-2 text-4xl font-black tabular-nums text-slate-900">{termProgressPct}%</p>
+          )}
+          <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full bg-gradient-to-r from-[#8b5cf6] to-violet-300 transition-all duration-1000"
+              style={{ width: `${termProgressPct}%` }}
+            />
+          </div>
         </div>
       </div>
 
-      <div className="grid gap-8 lg:grid-cols-2">
-        {/* Upcoming Exams Card */}
-        <section className="neo-card-elevated flex flex-col overflow-hidden">
-          <div className="flex items-center justify-between border-b border-[#ebe4d9]/60 bg-[#faf7f0]/60 px-6 py-5">
-            <h2 className="flex items-center gap-3 text-xs font-black uppercase tracking-widest text-[#2d3436]">
-              <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[#3498db]/10 text-[#3498db]">
-                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-              </span>
-              Exam Schedule
-            </h2>
-            <button className="text-[10px] font-black uppercase tracking-widest text-[#3498db] hover:underline">View All</button>
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className="flex flex-col overflow-hidden rounded-2xl border border-slate-100 bg-white">
+          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+            <h2 className="text-sm font-black uppercase tracking-wider text-slate-900">Upcoming Assessments</h2>
+            <span className="rounded-full bg-white px-3 py-1 text-xs font-black tabular-nums text-slate-900 ring-1 ring-slate-200">
+              {loading ? "…" : upcomingExams.length}
+            </span>
           </div>
-          <div className="flex-1 p-6">
+          <div className="flex-1 p-5">
             {loading ? (
-              <div className="space-y-4">
-                {[1, 2, 3, 4].map(i => <div key={i} className="h-14 w-full animate-pulse rounded-2xl bg-[#ebe4d9]/40"></div>)}
+              <div className="space-y-3">
+                {[1, 2, 3, 4].map((i) => (
+                  <div key={i} className="h-16 animate-pulse rounded-xl bg-slate-100" />
+                ))}
               </div>
             ) : upcomingExams.length > 0 ? (
-              <div className="space-y-4">
-                {upcomingExams.map(ex => (
-                  <div key={ex.id} className="group flex items-center justify-between rounded-2xl border border-[#ebe4d9]/50 bg-white/40 p-4 transition-all hover:translate-x-1 hover:bg-white/80 hover:shadow-md">
-                    <div className="flex items-center gap-4">
-                      <div className="flex h-10 w-10 flex-col items-center justify-center rounded-xl bg-[#3498db]/10 font-black text-[#3498db]">
-                        <span className="text-[10px] leading-none uppercase">{ex.examDate.split('-')[1]}</span>
-                        <span className="text-sm leading-none">{ex.examDate.split('-')[2]}</span>
+              <ul className="space-y-3">
+                {upcomingExams.map((ex) => {
+                  const delta = daysFromTodayStart(ex.examDate);
+                  const meta = assessmentStatusMeta(delta);
+                  const examDt = /^\d{4}-\d{2}-\d{2}$/.test(ex.examDate) ? new Date(ex.examDate + "T12:00:00") : null;
+                  const monthAbbr =
+                    examDt && !Number.isNaN(examDt.getTime())
+                      ? examDt.toLocaleDateString("en-US", { month: "short" })
+                      : "—";
+                  const dayNum =
+                    examDt && !Number.isNaN(examDt.getTime()) ? String(examDt.getDate()) : ex.examDate.slice(8, 10);
+                  return (
+                    <li
+                      key={ex.id}
+                      className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-xl border border-slate-100 bg-white px-3 py-3"
+                    >
+                      <div className="flex min-w-[52px] flex-col items-center justify-center rounded-lg border border-slate-100 bg-white px-2 py-2 text-center">
+                        <span className="text-[10px] font-bold uppercase leading-none text-slate-500">{monthAbbr}</span>
+                        <span className="text-lg font-black leading-tight text-slate-900">{dayNum}</span>
                       </div>
-                      <div>
-                        <p className="text-sm font-black text-[#2d3436]">{ex.subject}</p>
-                        <p className="text-[10px] font-bold text-[#636e72] uppercase tracking-wide">{ex.className} · {ex.examKey}</p>
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold text-slate-900">{ex.subject}</p>
+                        <p className="text-xs font-medium text-slate-500">
+                          {ex.className} · {ex.examKey}
+                        </p>
                       </div>
-                    </div>
-                    <div className="rounded-full bg-[#ebe4d9]/40 px-3 py-1 text-[10px] font-black text-[#2d3436]">
-                      {ex.examDate}
-                    </div>
-                  </div>
-                ))}
-              </div>
+                      <span
+                        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ring-1 ${meta.pillClass}`}
+                      >
+                        <span className={`h-1.5 w-1.5 rounded-full ${meta.dotClass}`} aria-hidden />
+                        {meta.label}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
             ) : (
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-[#ebe4d9]/30 text-[#636e72]">
-                  <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <div className="flex flex-col items-center justify-center py-14 text-center">
+                <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-100 bg-slate-50 text-slate-400">
+                  <svg className="h-7 w-7" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
                 </div>
-                <p className="text-sm font-bold text-[#636e72]">No exams scheduled for the near future.</p>
+                <p className="text-sm font-semibold text-slate-700">No assessments scheduled</p>
+                <button
+                  type="button"
+                  onClick={() => openScheduleAssessment()}
+                  className="mt-5 rounded-full border border-slate-200 bg-white px-5 py-2 text-xs font-semibold text-slate-800 shadow-sm hover:bg-slate-50"
+                >
+                  Schedule Assessment
+                </button>
               </div>
             )}
           </div>
         </section>
 
-        {/* Performance Chart / Summary */}
-        <section className="neo-card-elevated flex flex-col overflow-hidden">
-          <div className="flex items-center justify-between border-b border-[#ebe4d9]/60 bg-[#faf7f0]/60 px-6 py-5">
-            <h2 className="flex items-center gap-3 text-xs font-black uppercase tracking-widest text-[#2d3436]">
-               <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[#e67e22]/10 text-[#e67e22]">
-                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-              </span>
-              Class Averages
-            </h2>
-             <button className="text-[10px] font-black uppercase tracking-widest text-[#e67e22] hover:underline">Analytics</button>
+        <section className="flex flex-col overflow-hidden rounded-2xl border border-slate-100 bg-white">
+          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+            <h2 className="text-sm font-black uppercase tracking-wider text-slate-900">Performance Overview</h2>
+            <button
+              type="button"
+              className="rounded-full border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-50"
+              title="Sort / filter"
+              aria-label="Sort or filter"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
+              </svg>
+            </button>
           </div>
-          <div className="flex-1 p-6">
+          <div className="flex-1 p-5">
             {loading ? (
-               <div className="h-full w-full animate-pulse rounded-2xl bg-[#ebe4d9]/40"></div>
-            ) : performanceSummary.length > 0 ? (
-              <div className="space-y-6">
-                {performanceSummary.map(row => (
-                  <div key={row.classRoomId} className="group">
-                    <div className="mb-2 flex justify-between text-xs font-black text-[#2d3436]">
-                      <span className="uppercase tracking-wide">{row.className}</span>
-                      <span className="rounded-md bg-[#ebe4d9]/30 px-2 py-0.5">{row.avgScore}%</span>
-                    </div>
-                    <div className="h-2.5 overflow-hidden rounded-full bg-[#ebe4d9]/50 shadow-inner">
-                      <div 
-                        className={`h-full transition-all duration-1000 ${
-                          Number(row.avgScore) > 75 ? 'bg-gradient-to-r from-[#2ecc71] to-[#27ae60]' :
-                          Number(row.avgScore) > 50 ? 'bg-gradient-to-r from-[#3498db] to-[#2980b9]' :
-                          'bg-gradient-to-r from-[#e67e22] to-[#d35400]'
-                        }`}
-                        style={{ width: `${row.avgScore}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <div className="h-48 animate-pulse rounded-xl bg-slate-100" />
+            ) : sortedPerformance.length > 0 ? (
+              <ul className="space-y-5">
+                {sortedPerformance.map((row, idx) => {
+                  const pct = Number(row.avgScore);
+                  const barClass =
+                    pct >= 75
+                      ? "bg-gradient-to-r from-emerald-500 to-emerald-400"
+                      : pct >= 50
+                        ? "bg-gradient-to-r from-blue-500 to-sky-400"
+                        : "bg-gradient-to-r from-rose-500 to-rose-400";
+                  return (
+                    <li key={row.classRoomId}>
+                      <div className="mb-1.5 flex items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="text-xs font-semibold tabular-nums text-slate-400">#{idx + 1}</span>
+                          <span className="truncate font-semibold text-slate-900">{row.className}</span>
+                        </div>
+                        <span className="shrink-0 rounded-full bg-slate-50 px-2 py-0.5 text-xs font-semibold text-slate-800 ring-1 ring-slate-100">
+                          {row.avgScore}%
+                        </span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
+                        <div
+                          className={`h-full rounded-full transition-all duration-1000 ${barClass}`}
+                          style={{ width: `${Math.min(Math.max(pct, 0), 100)}%` }}
+                        />
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
             ) : (
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-[#ebe4d9]/30 text-[#636e72]">
-                  <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/></svg>
-                </div>
-                <p className="text-sm font-bold text-[#636e72]">No result data available for this term.</p>
+              <div className="flex flex-col items-center justify-center py-14 text-center">
+                <p className="text-sm font-semibold text-slate-600">No result data available for this term.</p>
               </div>
             )}
           </div>
         </section>
       </div>
 
-      {/* Exam Types & Configuration Quick Links */}
-      <section className="neo-card p-6">
-        <div className="mb-6 flex items-center justify-between">
-          <h2 className="text-xs font-black uppercase tracking-widest text-[#2d3436]">Active Assessment Modules</h2>
-          <button className="rounded-full bg-white/80 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-[#2d3436] shadow-sm hover:bg-white transition">Configuration</button>
-        </div>
-        <div className="flex flex-wrap gap-4">
-          {examTypes.map(t => (
-            <div key={t.id} className="flex items-center gap-3 rounded-2xl border border-[#ebe4d9]/60 bg-white/60 p-3 pr-5 shadow-sm transition-all hover:shadow-md">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#9b59b6]/10 text-lg">
-                📝
-              </div>
-              <div>
-                <p className="text-xs font-black text-[#2d3436]">{t.displayName}</p>
-                <p className="text-[10px] font-bold text-[#636e72] uppercase tracking-tighter">{t.examKey}</p>
-              </div>
+      <div>
+        <h2 className="mb-3 text-xs font-black uppercase tracking-wider text-slate-900">Assessment modules</h2>
+        <div className="flex flex-wrap gap-3">
+          {examTypes.map((t) => (
+            <div
+              key={t.id}
+              className={`min-w-[140px] flex-1 rounded-2xl border border-slate-100 border-l-4 bg-white px-4 py-3 sm:flex-none ${examTypeStripAccent(t.examKey)}`}
+            >
+              <p className="font-mono text-xs font-semibold text-slate-600">{t.examKey}</p>
+              <p className="mt-0.5 text-sm font-medium text-slate-900">{t.displayName}</p>
             </div>
           ))}
-          {examTypes.length === 0 && !loading && (
-            <div className="w-full py-4 text-center text-xs font-bold text-[#636e72]">No active assessment modules found.</div>
-          )}
+          {examTypes.length === 0 && !loading ? (
+            <p className="w-full py-4 text-center text-xs font-semibold text-slate-500">No active assessment modules found.</p>
+          ) : null}
         </div>
-      </section>
+      </div>
     </div>
   );
 }
@@ -302,17 +474,17 @@ function fmtPct(v: number | null): string {
 }
 
 function PerformanceStatsPage({ section }: { section: CurriculumSection }) {
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
   const [rows, setRows] = useState<PerformanceSummaryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [term, setTerm] = useState("Term 1");
   const examType = examTypeForSection(section);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void fetchPerformanceSummary(term, examType)
+    void fetchPerformanceSummary(viewingTerm, examType, viewingAcademicYear)
       .then((items) => {
         if (!cancelled) setRows(items);
       })
@@ -328,7 +500,7 @@ function PerformanceStatsPage({ section }: { section: CurriculumSection }) {
     return () => {
       cancelled = true;
     };
-  }, [examType, term]);
+  }, [examType, viewingTerm, viewingAcademicYear]);
 
   const classesCount = useMemo(() => new Set(rows.map((x) => x.className)).size, [rows]);
   const totalStudents = useMemo(() => rows.reduce((sum, r) => sum + r.totalStudents, 0), [rows]);
@@ -345,17 +517,9 @@ function PerformanceStatsPage({ section }: { section: CurriculumSection }) {
           <p className="mt-1 text-sm font-semibold text-[#636e72]">Performance statistics grouped by section and class.</p>
         </div>
         
-        <div className="flex items-center gap-3">
-          <label className="text-xs font-black uppercase tracking-widest text-[#636e72]">Active Term:</label>
-          <select
-            value={term}
-            onChange={(e) => setTerm(e.target.value)}
-            className="neo-inset-field rounded-full px-4 py-2 text-sm font-bold text-[#2d3436] outline-none"
-          >
-            <option value="Term 1">Term 1</option>
-            <option value="Term 2">Term 2</option>
-            <option value="Term 3">Term 3</option>
-          </select>
+        <div className="flex items-center gap-2 rounded-full border border-[#ebe4d9]/80 bg-[#faf7f0]/80 px-4 py-2 text-sm font-bold text-[#2d3436]">
+          <span className="text-xs font-black uppercase tracking-widest text-[#636e72]">Term</span>
+          {viewingTerm}
         </div>
       </header>
 
@@ -450,6 +614,7 @@ function StudentMarksEntryPage({
   onBack: () => void;
   onSaved: () => void;
 }) {
+  const { viewingAcademicYear, historicalReadOnly } = useTermContext();
   const [entryStudent, setEntryStudent] = useState<{
     studentId: number;
     fullName: string;
@@ -466,7 +631,7 @@ function StudentMarksEntryPage({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void fetchStudentMarkEntry({ studentId, term, examType })
+    void fetchStudentMarkEntry({ studentId, term, examType, academicYear: viewingAcademicYear })
       .then((data) => {
         if (cancelled) return;
         setEntryStudent({
@@ -489,7 +654,7 @@ function StudentMarksEntryPage({
     return () => {
       cancelled = true;
     };
-  }, [studentId, term, examType]);
+  }, [studentId, term, examType, viewingAcademicYear]);
 
   function updateSubjectMark(subject: string, score: string) {
     setEntryStudent((prev) => {
@@ -503,6 +668,10 @@ function StudentMarksEntryPage({
 
   async function onSaveStudentMarks() {
     if (!entryStudent) return;
+    if (historicalReadOnly) {
+      setError("Only administrators can save marks when viewing a past term.");
+      return;
+    }
     setSaving(true);
     setError(null);
     setSuccess(null);
@@ -524,6 +693,7 @@ function StudentMarksEntryPage({
         studentId: entryStudent.studentId,
         term,
         examType,
+        academicYear: viewingAcademicYear,
         marks,
       });
       if (saved.saved > 0) {
@@ -548,7 +718,7 @@ function StudentMarksEntryPage({
           <button
             onClick={onBack}
             className="neo-icon-btn flex h-10 w-10 items-center justify-center bg-white/60 text-[#2d3436] transition-transform active:scale-90"
-            title="Go back"
+            title="Return to the student list"
           >
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 19l-7-7 7-7" />
@@ -557,7 +727,7 @@ function StudentMarksEntryPage({
           <div>
             <h1 className="text-2xl font-black tracking-tight text-[#2d3436]">Marks Entry</h1>
             <p className="mt-0.5 text-sm font-medium text-[#636e72]">
-              Academic Year 2026 · {term} · {examType}
+              Academic Year {viewingAcademicYear} · {term} · {examType}
             </p>
           </div>
         </div>
@@ -566,8 +736,9 @@ function StudentMarksEntryPage({
           <button
             type="button"
             onClick={() => void onSaveStudentMarks()}
-            disabled={saving || loading || !entryStudent}
+            disabled={historicalReadOnly || saving || loading || !entryStudent}
             className="flex items-center gap-2 rounded-full bg-gradient-to-br from-[#2ecc71] to-[#27ae60] px-6 py-2.5 text-sm font-bold text-white shadow-lg transition hover:brightness-110 active:scale-95 disabled:opacity-50"
+            title="Save and finalize student marks for this subject"
           >
             {saving ? (
               <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24">
@@ -719,8 +890,8 @@ function StudentMarksEntryPage({
 }
 
 function ResultEntryPage({ mode }: { mode: "exams" | "assessments" }) {
+  const { viewingTerm: term, viewingAcademicYear: academicYear } = useTermContext();
   const [options, setOptions] = useState<ResultEntryOptions | null>(null);
-  const [term, setTerm] = useState("Term 1");
   const [examType, setExamType] = useState<ExamType>("");
   const [selectedClassId, setSelectedClassId] = useState<number | null>(null);
   const [rows, setRows] = useState<
@@ -746,7 +917,6 @@ function ResultEntryPage({ mode }: { mode: "exams" | "assessments" }) {
       .then((data) => {
         if (cancelled) return;
         setOptions(data);
-        setTerm(data.terms[0] ?? "Term 1");
         setSelectedClassId(data.classes[0]?.id ?? null);
         if (mode === "assessments") {
           const hasAssessment = data.examTypes.includes("ASSESSMENT");
@@ -780,6 +950,7 @@ function ResultEntryPage({ mode }: { mode: "exams" | "assessments" }) {
       term,
       examType,
       classRoomId: selectedClassId,
+      academicYear,
     })
       .then((items) => {
         if (cancelled) return;
@@ -807,7 +978,7 @@ function ResultEntryPage({ mode }: { mode: "exams" | "assessments" }) {
     return () => {
       cancelled = true;
     };
-  }, [selectedClassId, term, examType, options?.classes]);
+  }, [selectedClassId, term, examType, academicYear, options?.classes]);
 
   const filteredRows = useMemo(() => {
     const s = searchTerm.toLowerCase().trim();
@@ -858,19 +1029,9 @@ function ResultEntryPage({ mode }: { mode: "exams" | "assessments" }) {
         </div>
         
         <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2">
-            <label className="text-xs font-black uppercase tracking-widest text-[#636e72]">Term:</label>
-            <select
-              value={term}
-              onChange={(e) => setTerm(e.target.value)}
-              className="neo-inset-field rounded-full px-4 py-2 text-sm font-bold text-[#2d3436] outline-none"
-            >
-              {(options?.terms ?? ["Term 1", "Term 2", "Term 3"]).map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
+          <div className="flex items-center gap-2 rounded-full border border-[#ebe4d9]/80 bg-[#faf7f0]/80 px-3 py-2 text-sm font-bold text-[#2d3436]">
+            <span className="text-xs font-black uppercase tracking-widest text-[#636e72]">Term</span>
+            {term}
           </div>
 
           <div className="flex items-center gap-2">
@@ -1051,43 +1212,376 @@ function ResultEntryPage({ mode }: { mode: "exams" | "assessments" }) {
 
 function SubjectsConfigPage() {
   const { resolvedTheme } = useTheme();
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
   const isDarkUi = resolvedTheme === "dark" || resolvedTheme === "tinted-dark";
-  
-  const [activeTab, setActiveTab] = useState<"subjects" | "exams" | "schedule">("subjects");
+
+  type TabKey = "subjects" | "exams" | "schedule";
+
+  type ToastMessage = { type: "success" | "error"; message: string };
+
+  function Toast({ toast, onClose }: { toast: ToastMessage; onClose: () => void }) {
+    return (
+      <div
+        className={`fixed top-4 right-4 z-50 max-w-[92vw] rounded-xl px-4 py-3 shadow-lg ring-1 backdrop-blur ${
+          toast.type === "success"
+            ? "bg-emerald-50/90 text-emerald-800 ring-emerald-200"
+            : "bg-amber-50/90 text-amber-900 ring-amber-200"
+        }`}
+        role="status"
+      >
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 text-sm">{toast.type === "success" ? "✅" : "⚠️"}</div>
+          <div className="text-sm font-semibold">{toast.message}</div>
+          <button
+            type="button"
+            className="ml-1 rounded-full p-1 opacity-70 hover:bg-black/5 hover:opacity-100 transition"
+            onClick={onClose}
+            aria-label="Dismiss"
+            title="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function classNames(...parts: Array<string | false | null | undefined>) {
+    return parts.filter(Boolean).join(" ");
+  }
+
+  function categoryBadgeClass(categoryName: string): string {
+    const name = categoryName.trim().toLowerCase();
+    const palette = [
+      "bg-blue-50 text-blue-700 ring-blue-200",
+      "bg-emerald-50 text-emerald-700 ring-emerald-200",
+      "bg-violet-50 text-violet-700 ring-violet-200",
+      "bg-amber-50 text-amber-800 ring-amber-200",
+      "bg-sky-50 text-sky-700 ring-sky-200",
+      "bg-teal-50 text-teal-700 ring-teal-200",
+    ];
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    return palette[h % palette.length]!;
+  }
+
+  function toYmd(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function parseYmd(v: string): Date | null {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+    const [y, m, d] = v.split("-").map((x) => Number(x));
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+    const dt = new Date(y, m - 1, d);
+    if (Number.isNaN(dt.getTime())) return null;
+    // Guard against JS date coercion (e.g. 2026-02-31).
+    if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
+    return dt;
+  }
+
+  function CalendarPicker({
+    value,
+    onChange,
+    disabled,
+    placeholder,
+  }: {
+    value: string;
+    onChange: (v: string) => void;
+    disabled?: boolean;
+    placeholder?: string;
+  }) {
+    const [open, setOpen] = useState(false);
+    const selected = parseYmd(value);
+    const [cursor, setCursor] = useState<Date>(() => selected ?? new Date());
+    const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+    const monthLabel = monthStart.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+    const startDow = monthStart.getDay(); // 0 sun
+    const gridStart = new Date(monthStart);
+    gridStart.setDate(gridStart.getDate() - startDow);
+
+    const days: Date[] = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(gridStart);
+      d.setDate(gridStart.getDate() + i);
+      days.push(d);
+    }
+
+    const display = selected ? selected.toLocaleDateString("en-UG", { day: "2-digit", month: "short", year: "numeric" }) : "";
+
+    return (
+      <div className="relative">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => setOpen((v) => !v)}
+          className={classNames(
+            "w-full rounded-xl border px-3 py-2.5 text-sm text-left transition focus:outline-none focus:ring-2",
+            "border-slate-200 bg-white focus:ring-[#3B3FD8]/30",
+            disabled && "bg-slate-100 text-slate-500 cursor-not-allowed",
+          )}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span className={classNames("truncate", display ? "text-slate-800" : "text-slate-400")}>
+              {display || placeholder || "Select a date"}
+            </span>
+            <span className="text-slate-500">📅</span>
+          </div>
+        </button>
+
+        {open ? (
+          <div className="absolute z-50 mt-2 w-full rounded-2xl border border-slate-200 bg-white shadow-xl p-3">
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                className="rounded-lg px-2 py-1 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+                onClick={() => setCursor((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
+                title="Previous month"
+              >
+                ←
+              </button>
+              <div className="text-sm font-bold text-slate-800">{monthLabel}</div>
+              <button
+                type="button"
+                className="rounded-lg px-2 py-1 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+                onClick={() => setCursor((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+                title="Next month"
+              >
+                →
+              </button>
+            </div>
+
+            <div className="mt-2 grid grid-cols-7 gap-1 text-center text-[11px] font-semibold text-slate-500">
+              {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
+                <div key={d} className="py-1">{d}</div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-7 gap-1">
+              {days.map((d) => {
+                const inMonth = d.getMonth() === monthStart.getMonth();
+                const ymd = toYmd(d);
+                const isSelected = value === ymd;
+                return (
+                  <button
+                    key={ymd}
+                    type="button"
+                    className={classNames(
+                      "h-9 rounded-lg text-sm font-semibold transition",
+                      inMonth ? "text-slate-800 hover:bg-slate-50" : "text-slate-400 hover:bg-slate-50",
+                      isSelected && "bg-[#3B3FD8] text-white hover:bg-[#3B3FD8]",
+                    )}
+                    onClick={() => {
+                      onChange(ymd);
+                      setOpen(false);
+                    }}
+                  >
+                    {d.getDate()}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-2 flex items-center justify-between">
+              <button
+                type="button"
+                className="text-xs font-semibold text-slate-600 hover:underline"
+                onClick={() => {
+                  onChange("");
+                  setOpen(false);
+                }}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="text-xs font-semibold text-[#3B3FD8] hover:underline"
+                onClick={() => {
+                  onChange(toYmd(new Date()));
+                  setOpen(false);
+                }}
+              >
+                Today
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  const [activeTab, setActiveTab] = useState<TabKey>("subjects");
+  useEffect(() => {
+    try {
+      const v = sessionStorage.getItem(SUBJECTS_CONFIG_TAB_STORAGE_KEY);
+      if (v === "schedule") {
+        setActiveTab("schedule");
+        sessionStorage.removeItem(SUBJECTS_CONFIG_TAB_STORAGE_KEY);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   const [categories, setCategories] = useState<Array<{ id: number; name: string }>>([]);
   const [subjectItems, setSubjectItems] = useState<SubjectAssignmentConfigRow[]>([]);
   const [examTypes, setExamTypes] = useState<ExamTypeConfigRow[]>([]);
-  const [classes, setClasses] = useState<Array<{ id: number; name: string }>>([]);
-  const [, setLoading] = useState(false);
+  const [classes, setClasses] = useState<
+    Array<{ id: number; name: string; categoryId: number | null; categoryName: string | null }>
+  >([]);
+  const [loading, setLoading] = useState(false);
+  const [bannerOpen, setBannerOpen] = useState(true);
+  const [toast, setToast] = useState<ToastMessage | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // New scheduler state
+  // Tab 3 — Scheduling
+  const [schedCategoryId, setSchedCategoryId] = useState<number | null>(null);
   const [schedClassId, setSchedClassId] = useState("");
   const [schedExamType, setSchedExamType] = useState("");
   const [schedSubject, setSchedSubject] = useState("");
   const [schedDate, setSchedDate] = useState("");
   const [schedBusy, setSchedBusy] = useState(false);
 
-  // Existing assignment state
+  // Tab 1 — Subject assignment (modal)
   const [subjectCategoryId, setSubjectCategoryId] = useState<number | null>(null);
   const [subjectSectionName, setSubjectSectionName] = useState("");
   const [subjectName, setSubjectName] = useState("");
+  const [subjectShortForm, setSubjectShortForm] = useState("");
+  const [editingSubjectId, setEditingSubjectId] = useState<number | null>(null);
+  const [subjectModalOpen, setSubjectModalOpen] = useState(false);
+
+  // Tab 2 — Exam types (form)
   const [newExamKey, setNewExamKey] = useState("");
   const [newExamLabel, setNewExamLabel] = useState("");
+  const [examFormTouched, setExamFormTouched] = useState<{ key: boolean; label: boolean }>({ key: false, label: false });
+
+  const inputBase = classNames(
+    "w-full rounded-xl border px-3 py-2.5 text-sm transition focus:outline-none focus:ring-2",
+    isDarkUi ? "border-slate-700 bg-slate-900 text-slate-100 focus:ring-[#3B3FD8]/30" : "border-slate-200 bg-white text-slate-800 focus:ring-[#3B3FD8]/30",
+  );
 
   const createdExamTypes = useMemo(
-    () => examTypes.filter((row) => !row.isSystem && row.isActive),
+    () => examTypes.filter((row) => row.isActive),
     [examTypes],
   );
 
-  const schedClassOptions = useMemo(() => {
-    const assignedCategoryIds = new Set(subjectItems.map((row) => row.classCategoryId));
-    const assignedCategoryNames = new Set(
-      categories.filter((c) => assignedCategoryIds.has(c.id)).map((c) => c.name.trim()),
-    );
-    if (assignedCategoryNames.size === 0) return [];
-    return classes.filter((cls) => assignedCategoryNames.has(cls.name.trim()));
-  }, [subjectItems, categories, classes]);
+  const subjectCountsByCategory = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const row of subjectItems) m.set(row.classCategoryId, (m.get(row.classCategoryId) ?? 0) + 1);
+    return m;
+  }, [subjectItems]);
+
+  const [filterCategoryId, setFilterCategoryId] = useState<number | "">("");
+  const [filterSection, setFilterSection] = useState("");
+  const [filterSubject, setFilterSubject] = useState("");
+
+  const filteredSubjectItems = useMemo(() => {
+    const qSection = filterSection.trim().toLowerCase();
+    const qSubject = filterSubject.trim().toLowerCase();
+    return subjectItems.filter((row) => {
+      if (filterCategoryId !== "" && row.classCategoryId !== filterCategoryId) return false;
+      const sec = (row.sectionName ?? "").trim().toLowerCase();
+      const subj = row.subjectName.trim().toLowerCase();
+      if (qSection && !sec.includes(qSection)) return false;
+      if (qSubject && !subj.includes(qSubject)) return false;
+      return true;
+    });
+  }, [subjectItems, filterCategoryId, filterSection, filterSubject]);
+
+  const groupedSubjects = useMemo(() => {
+    const m = new Map<number, SubjectAssignmentConfigRow[]>();
+    for (const row of filteredSubjectItems) {
+      const list = m.get(row.classCategoryId) ?? [];
+      list.push(row);
+      m.set(row.classCategoryId, list);
+    }
+    for (const [k, list] of m.entries()) {
+      list.sort((a, b) => (a.sectionName ?? "").localeCompare(b.sectionName ?? "") || a.subjectName.localeCompare(b.subjectName));
+      m.set(k, list);
+    }
+    return m;
+  }, [filteredSubjectItems]);
+
+  const sectionOptionsForSelectedCategory = useMemo(() => {
+    const id = subjectCategoryId;
+    if (!id) return [];
+    const set = new Set<string>();
+    for (const row of subjectItems) {
+      if (row.classCategoryId !== id) continue;
+      const s = (row.sectionName ?? "").trim();
+      if (s) set.add(s);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [subjectCategoryId, subjectItems]);
+
+  const selectedClassRow = useMemo(() => {
+    const id = Number(schedClassId);
+    if (!Number.isFinite(id) || id < 1) return null;
+    return classes.find((c) => c.id === id) ?? null;
+  }, [schedClassId, classes]);
+
+  const selectedClassHasAssignments = useMemo(() => {
+    const catId = selectedClassRow?.categoryId ?? null;
+    if (!catId) return false;
+    return subjectItems.some((x) => x.classCategoryId === catId);
+  }, [selectedClassRow?.categoryId, subjectItems]);
+
+  const scheduleCategoryOptions = useMemo(
+    () =>
+      Array.from(
+        new Map(
+          classes
+            .filter((c) => c.categoryId != null)
+            .map((c) => [c.categoryId as number, c.categoryName ?? "Uncategorized"]),
+        ).entries(),
+      ).map(([id, name]) => ({ id, name })),
+    [classes],
+  );
+
+  const scheduleClassOptions = useMemo(() => {
+    if (schedCategoryId == null) return [];
+    return classes.filter((c) => c.categoryId === schedCategoryId);
+  }, [classes, schedCategoryId]);
+
+  const scheduleSubjectSelectOptions = useMemo(() => {
+    const catId = selectedClassRow?.categoryId ?? null;
+    if (catId == null) return [];
+    const byName = new Map<string, SubjectAssignmentConfigRow>();
+    for (const row of subjectItems) {
+      if (row.classCategoryId !== catId) continue;
+      if (!byName.has(row.subjectName)) byName.set(row.subjectName, row);
+    }
+    return Array.from(byName.values()).sort((a, b) => a.subjectName.localeCompare(b.subjectName));
+  }, [selectedClassRow?.categoryId, subjectItems]);
+
+  useLayoutEffect(() => {
+    if (scheduleCategoryOptions.length === 0) {
+      setSchedCategoryId(null);
+      return;
+    }
+    setSchedCategoryId((prev) => {
+      if (prev != null && scheduleCategoryOptions.some((o) => o.id === prev)) return prev;
+      return scheduleCategoryOptions[0]!.id;
+    });
+  }, [scheduleCategoryOptions]);
+
+  useEffect(() => {
+    setSchedClassId("");
+    setSchedSubject("");
+  }, [schedCategoryId]);
+
+  const toastError = useMemo(() => (msg: string) => {
+    setToast({ type: "error", message: msg });
+    window.setTimeout(() => setToast(null), 3500);
+  }, []);
+
+  const toastSuccess = useMemo(() => (msg: string) => {
+    setToast({ type: "success", message: msg });
+    window.setTimeout(() => setToast(null), 3500);
+  }, []);
 
   async function refresh() {
     setLoading(true);
@@ -1096,14 +1590,21 @@ function SubjectsConfigPage() {
       const [subjectPayload, examRows, entryOptions] = await Promise.all([
         fetchSubjectConfigs(),
         fetchExamTypeConfigs(),
-        fetchResultEntryOptions()
+        fetchResultEntryOptions(),
       ]);
       setCategories(subjectPayload.categories);
       setSubjectItems(subjectPayload.items);
       setExamTypes(examRows);
-      setClasses(entryOptions.classes);
+      setClasses(
+        (entryOptions.classes ?? []).map((c) => ({
+          id: c.id,
+          name: c.name,
+          categoryId: c.categoryId ?? null,
+          categoryName: c.categoryName ?? null,
+        })),
+      );
       if (subjectPayload.categories.length > 0 && subjectCategoryId == null) {
-        setSubjectCategoryId(subjectPayload.categories[0].id);
+        setSubjectCategoryId(subjectPayload.categories[0]!.id);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load settings");
@@ -1114,337 +1615,911 @@ function SubjectsConfigPage() {
 
   useEffect(() => {
     void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function onScheduleExam() {
-    if (!schedClassId || !schedExamType || !schedSubject || !schedDate) {
-      setError("Please fill all scheduling fields.");
-      return;
-    }
+    if (schedCategoryId == null) return;
+    const classRoomId = Number(schedClassId);
+    const examKey = schedExamType.trim().toUpperCase();
+    const subject = schedSubject.trim();
+    const examDate = schedDate.trim();
+
+    if (!Number.isFinite(classRoomId) || classRoomId < 1) return;
+    if (!examKey || !examDate) return;
+
     setSchedBusy(true);
     setError(null);
     try {
       await createExam({
-        examKey: schedExamType,
-        classRoomId: Number(schedClassId),
-        subject: schedSubject,
-        examDate: schedDate
+        examKey,
+        classRoomId,
+        subject,
+        examDate,
+        term: viewingTerm,
+        academicYear: viewingAcademicYear,
       });
       setSchedSubject("");
       setSchedDate("");
-      alert("Exam/Assessment scheduled successfully!");
+      toastSuccess("Assessment scheduled successfully.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to schedule exam");
+      const msg = e instanceof Error ? e.message : "Failed to schedule exam";
+      setError(msg);
+      toastError(msg);
     } finally {
       setSchedBusy(false);
     }
   }
 
+  const examKeyNorm = newExamKey.toUpperCase().replace(/\s+/g, "_");
+  const examKeyError =
+    !examKeyNorm.trim()
+      ? "Reference Key is required."
+      : /[^A-Z0-9_]/.test(examKeyNorm)
+        ? "Use uppercase letters, numbers, and underscores only."
+        : null;
+  const examLabelError = !newExamLabel.trim() ? "Display Label is required." : null;
+  const canSubmitExamType = !examKeyError && !examLabelError;
+
   async function onAddExamType() {
-    const examKey = newExamKey.trim();
-    const displayName = newExamLabel.trim();
-    if (!examKey || !displayName) return;
+    setExamFormTouched({ key: true, label: true });
+    if (!canSubmitExamType) return;
     try {
-      await createExamTypeConfig({ examKey, displayName });
+      await createExamTypeConfig({ examKey: examKeyNorm.trim(), displayName: newExamLabel.trim() });
       setNewExamKey("");
       setNewExamLabel("");
+      setExamFormTouched({ key: false, label: false });
       await refresh();
       window.dispatchEvent(new Event("academics:exam-types-changed"));
+      toastSuccess("Exam type registered.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to add exam type");
+      const msg = e instanceof Error ? e.message : "Failed to add exam type";
+      setError(msg);
+      toastError(msg);
     }
   }
 
   async function onDeleteExamType(row: ExamTypeConfigRow) {
+    const ok = window.confirm(`Delete exam type "${row.displayName}" (${row.examKey})?`);
+    if (!ok) return;
     try {
       await deleteExamTypeConfig(row.id);
       await refresh();
       window.dispatchEvent(new Event("academics:exam-types-changed"));
+      toastSuccess("Exam type deleted.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete exam type");
+      const msg = e instanceof Error ? e.message : "Failed to delete exam type";
+      setError(msg);
+      toastError(msg);
     }
   }
 
   async function onAddSubject() {
     if (!subjectCategoryId) return;
-    const cleanSubject = subjectName.trim();
-    if (!cleanSubject) return;
-    try {
-      await createSubjectConfig({
-        classCategoryId: subjectCategoryId,
-        sectionName: subjectSectionName.trim() || undefined,
-        subjectName: cleanSubject,
-      });
-      setSubjectName("");
-      setSubjectSectionName("");
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to add subject assignment");
+    const subjectNameClean = subjectName.trim();
+    const shortForm = subjectShortForm.trim().toUpperCase();
+    if (!subjectNameClean) {
+      toastError("Subject is required.");
+      return;
     }
+    if (!shortForm || shortForm.length < 2 || shortForm.length > 5 || !/^[A-Z0-9.]+$/.test(shortForm)) {
+      toastError("Short Form is required (2–5 chars, uppercase; letters/numbers/dot).");
+      return;
+    }
+    try {
+      if (editingSubjectId) {
+        await updateSubjectConfig(editingSubjectId, {
+          classCategoryId: subjectCategoryId,
+          sectionName: subjectSectionName.trim() || undefined,
+          subjectName: subjectNameClean,
+          shortForm,
+        });
+      } else {
+        await createSubjectConfig({
+          classCategoryId: subjectCategoryId,
+          sectionName: subjectSectionName.trim() || undefined,
+          subjectName: subjectNameClean,
+          shortForm,
+        });
+      }
+      setSubjectName("");
+      setSubjectShortForm("");
+      setSubjectSectionName("");
+      setEditingSubjectId(null);
+      setSubjectModalOpen(false);
+      await refresh();
+      toastSuccess(editingSubjectId ? "Subject assignment updated." : "Subject assignment saved.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to add subject assignment";
+      setError(msg);
+      toastError(msg);
+    }
+  }
+
+  function openAddSubjectModal() {
+    setEditingSubjectId(null);
+    setSubjectCategoryId(categories[0]?.id ?? null);
+    setSubjectSectionName("");
+    setSubjectName("");
+    setSubjectShortForm("");
+    setSubjectModalOpen(true);
+  }
+
+  function openEditSubjectModal(row: SubjectAssignmentConfigRow) {
+    setEditingSubjectId(row.id);
+    setSubjectCategoryId(row.classCategoryId);
+    setSubjectSectionName((row.sectionName ?? "").trim());
+    setSubjectName(row.subjectName);
+    setSubjectShortForm(String(row.shortForm ?? "").trim().toUpperCase());
+    setSubjectModalOpen(true);
   }
 
   async function onDeleteSubject(id: number) {
+    const row = subjectItems.find((x) => x.id === id) ?? null;
+    let usage: { marksCount: number; examsCount: number } | null = null;
+    try {
+      usage = await fetchSubjectAssignmentUsage(id);
+    } catch {
+      usage = null;
+    }
+    const subjectLabel = row ? `"${row.subjectName}"` : "this subject";
+    const msg =
+      usage && usage.marksCount > 0
+        ? `Delete ${subjectLabel}?\n\nWARNING: ${usage.marksCount} recorded mark entries will be permanently deleted${
+            usage.examsCount > 0 ? `, and ${usage.examsCount} scheduled exams will be removed` : ""
+          }.\n\nIf you just want to rename it, click Cancel and use Edit instead.`
+        : `Remove ${subjectLabel} subject assignment?`;
+    const ok = window.confirm(msg);
+    if (!ok) return;
     try {
       await deleteSubjectConfig(id);
       await refresh();
+      toastSuccess("Subject assignment removed.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete subject assignment");
+      const msg = e instanceof Error ? e.message : "Failed to delete subject assignment";
+      setError(msg);
+      toastError(msg);
     }
   }
 
-  const categoryNameById = new Map(categories.map((c) => [c.id, c.name]));
+  const cardClass = classNames(
+    "rounded-2xl border shadow-sm",
+    isDarkUi ? "border-slate-800 bg-slate-950/40" : "border-slate-200 bg-white",
+  );
 
-  const inputClass = `w-full rounded-xl border px-4 py-2.5 text-xs transition-all focus:ring-4 outline-none ${
-    isDarkUi 
-      ? "bg-slate-800 border-slate-700 text-slate-200 placeholder-slate-500 focus:border-teal-500 focus:ring-teal-500/10" 
-      : "bg-slate-50 border-slate-100 text-[#2d3436] placeholder-slate-400 focus:border-teal-600 focus:ring-teal-600/5"
-  }`;
+  const pageBg = isDarkUi ? "bg-slate-950" : "bg-[#F1F5F9]";
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      {/* Premium Header */}
-      <div className={`neo-card overflow-hidden rounded-3xl border shadow-sm transition-all duration-500 ${
-        isDarkUi ? "bg-slate-900 border-slate-700" : "bg-white border-slate-100"
-      }`}>
-        <div className={`border-b px-8 py-6 flex flex-col sm:flex-row sm:items-center justify-between gap-6 ${isDarkUi ? "border-slate-800" : "border-slate-50"}`}>
-          <div>
-            <h1 className={`text-2xl font-black tracking-tight ${isDarkUi ? "text-white" : "text-[#0c2340]"}`}>Curriculum Configuration</h1>
-            <p className="mt-1 text-sm font-medium text-slate-500 uppercase tracking-widest">Subjects & Exam Engine</p>
+    <div className={classNames("space-y-4 rounded-2xl p-4 sm:p-6", pageBg)}>
+      {toast ? <Toast toast={toast} onClose={() => setToast(null)} /> : null}
+
+      <div className={classNames(cardClass, "overflow-hidden")}>
+        <div className={classNames("p-5 sm:p-6 border-b", isDarkUi ? "border-slate-800" : "border-slate-100")}>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className={classNames("text-2xl font-bold tracking-tight", isDarkUi ? "text-white" : "text-slate-900")}>
+                Subject &amp; Examination Configuration
+              </div>
+              <div className={classNames("mt-1 text-sm", isDarkUi ? "text-slate-400" : "text-slate-600")}>
+                Manage subjects, exam types, and assessment schedules
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 sm:items-end">
+              <div className={classNames("inline-flex rounded-xl p-1", isDarkUi ? "bg-slate-900 ring-1 ring-slate-800" : "bg-slate-100 ring-1 ring-slate-200")}>
+                <TabBtn active={activeTab === "subjects"} onClick={() => setActiveTab("subjects")} label="Subject Assignment" icon="📚" isDarkUi={isDarkUi} />
+                <TabBtn active={activeTab === "exams"} onClick={() => setActiveTab("exams")} label="Exam Types" icon="📝" isDarkUi={isDarkUi} />
+                <TabBtn active={activeTab === "schedule"} onClick={() => setActiveTab("schedule")} label="Scheduling" icon="📅" isDarkUi={isDarkUi} />
+              </div>
+            </div>
           </div>
-          <div className="flex bg-slate-100/50 dark:bg-slate-800/50 p-1 rounded-2xl border border-slate-200/50 dark:border-slate-700/50">
-             <TabBtn active={activeTab === "subjects"} onClick={() => setActiveTab("subjects")} label="Subject Assignment" icon="📚" isDarkUi={isDarkUi} />
-             <TabBtn active={activeTab === "exams"} onClick={() => setActiveTab("exams")} label="Exam Types" icon="📝" isDarkUi={isDarkUi} />
-             <TabBtn active={activeTab === "schedule"} onClick={() => setActiveTab("schedule")} label="Scheduling" icon="📅" isDarkUi={isDarkUi} />
-          </div>
+
+          {bannerOpen ? (
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900">
+              <div className="flex items-start justify-between gap-4">
+                <div className="text-sm font-semibold">
+                  ⚠️ Changes made here directly affect student academic records. Proceed with caution.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setBannerOpen(false)}
+                  className="rounded-full p-1 text-amber-900/70 hover:bg-amber-100 hover:text-amber-900 transition"
+                  aria-label="Dismiss warning"
+                  title="Dismiss"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
 
-        {error && (
-          <div className="mx-8 mt-6 flex items-center gap-3 rounded-xl bg-rose-500/10 border border-rose-500/20 p-4 text-rose-500">
-            <span className="text-xl">⚠️</span>
-            <p className="text-xs font-black uppercase tracking-tight">{error}</p>
-          </div>
-        )}
+        <div className="p-5 sm:p-6">
+          {error ? (
+            <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
+              ⚠️ {error}
+            </div>
+          ) : null}
 
-        <div className="p-8">
-          {activeTab === "subjects" && (
-            <div className="grid lg:grid-cols-[1fr_1.5fr] gap-10">
-               <div className="space-y-6">
-                  <div>
-                    <h3 className={`text-lg font-black ${isDarkUi ? "text-white" : "text-[#0c2340]"}`}>New Subject Assignment</h3>
-                    <p className="text-xs font-medium text-slate-500 mt-1">Define subjects for specific class categories.</p>
-                  </div>
-                  <div className="space-y-4">
-                     <div>
-                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Category</label>
+          <div
+            key={activeTab}
+            className="animate-in fade-in duration-200"
+          >
+            {activeTab === "subjects" ? (
+              <div className="grid gap-4 lg:grid-cols-10">
+                {/* Left (≈70%) */}
+                <section className={classNames(cardClass, "lg:col-span-7 overflow-hidden")}>
+                  <div className={classNames("p-5 border-b", isDarkUi ? "border-slate-800" : "border-slate-100")}>
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <div className={classNames("text-lg font-semibold", isDarkUi ? "text-white" : "text-slate-900")}>
+                          Subject Hierarchy
+                        </div>
+                        <div className={classNames("mt-1 text-sm", isDarkUi ? "text-slate-400" : "text-slate-600")}>
+                          Complete overview of assigned subjects by category and section.
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => openAddSubjectModal()}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#22C55E] px-4 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-110 active:scale-[0.99] transition"
+                      >
+                        <span className="text-base">＋</span>
+                        Add Subject
+                      </button>
+                    </div>
+
+                    {/* Filter bar */}
+                    <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                      <div>
+                        <div className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}>
+                          Category
+                        </div>
                         <select
-                          value={subjectCategoryId ?? ""}
-                          onChange={(e) => setSubjectCategoryId(Number(e.target.value))}
-                          className={inputClass}
+                          className={inputBase}
+                          value={filterCategoryId === "" ? "" : String(filterCategoryId)}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setFilterCategoryId(v ? Number(v) : "");
+                          }}
                         >
-                          <option value="" disabled>Select Category...</option>
-                          {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                          <option value="">All categories</option>
+                          {categories.map((c) => (
+                            <option key={c.id} value={String(c.id)}>{c.name}</option>
+                          ))}
                         </select>
-                     </div>
-                     <div>
-                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Section (Optional)</label>
-                        <input
-                          value={subjectSectionName}
-                          onChange={(e) => setSubjectSectionName(e.target.value)}
-                          placeholder="e.g. Upper Primary"
-                          className={inputClass}
-                        />
-                     </div>
-                     <div>
-                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Subject Name</label>
-                        <input
-                          value={subjectName}
-                          onChange={(e) => setSubjectName(e.target.value)}
-                          placeholder="e.g. Mathematics"
-                          className={inputClass}
-                        />
-                     </div>
-                     <button
-                        onClick={() => void onAddSubject()}
-                        className="w-full h-12 rounded-2xl bg-gradient-to-r from-teal-600 to-emerald-600 text-white text-xs font-black uppercase tracking-widest shadow-xl shadow-teal-600/20 transition-all hover:-translate-y-0.5 active:translate-y-0"
-                     >
-                        Assign Subject
-                     </button>
-                  </div>
-               </div>
-
-               <div className={`rounded-3xl border p-6 ${isDarkUi ? "bg-slate-800/20 border-slate-700" : "bg-slate-50 border-slate-100"}`}>
-                  <h3 className={`text-sm font-black uppercase tracking-widest mb-6 ${isDarkUi ? "text-slate-400" : "text-slate-500"}`}>Current Subject Ledger</h3>
-                  <div className="grid gap-3 max-h-[500px] overflow-y-auto custom-scrollbar pr-2">
-                    {subjectItems.map((row) => (
-                      <div
-                        key={row.id}
-                        className={`group flex items-center justify-between rounded-2xl border p-4 transition-all hover:scale-[1.02] ${
-                          isDarkUi ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200 shadow-sm"
-                        }`}
-                      >
-                        <div>
-                          <p className={`text-sm font-black ${isDarkUi ? "text-slate-200" : "text-[#0c2340]"}`}>{row.subjectName}</p>
-                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">
-                            {categoryNameById.get(row.classCategoryId)} · {row.sectionName || "General Curriculum"}
-                          </p>
-                        </div>
-                        <button
-                          onClick={() => void onDeleteSubject(row.id)}
-                          className="h-8 w-8 flex items-center justify-center rounded-xl bg-rose-500/10 text-rose-500 opacity-0 group-hover:opacity-100 transition-all hover:bg-rose-500 hover:text-white"
-                        >
-                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
                       </div>
-                    ))}
-                  </div>
-               </div>
-            </div>
-          )}
-
-          {activeTab === "exams" && (
-            <div className="grid lg:grid-cols-[1fr_1.5fr] gap-10">
-               <div className="space-y-6">
-                  <div>
-                    <h3 className={`text-lg font-black ${isDarkUi ? "text-white" : "text-[#0c2340]"}`}>Custom Exam Types</h3>
-                    <p className="text-xs font-medium text-slate-500 mt-1">Add non-standard assessment cycles.</p>
-                  </div>
-                  <div className="space-y-4">
-                     <div>
-                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Reference Key</label>
-                        <input
-                          value={newExamKey}
-                          onChange={(e) => setNewExamKey(e.target.value.toUpperCase())}
-                          placeholder="e.g. MOCK"
-                          className={inputClass}
-                        />
-                     </div>
-                     <div>
-                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Display Label</label>
-                        <input
-                          value={newExamLabel}
-                          onChange={(e) => setNewExamLabel(e.target.value)}
-                          placeholder="e.g. Mock Examination"
-                          className={inputClass}
-                        />
-                     </div>
-                     <button
-                        onClick={() => void onAddExamType()}
-                        className="w-full h-12 rounded-2xl bg-gradient-to-r from-indigo-600 to-blue-600 text-white text-xs font-black uppercase tracking-widest shadow-xl shadow-indigo-600/20 transition-all hover:-translate-y-0.5 active:translate-y-0"
-                     >
-                        Register Exam Type
-                     </button>
-                  </div>
-               </div>
-
-               <div className={`rounded-3xl border p-6 ${isDarkUi ? "bg-slate-800/20 border-slate-700" : "bg-slate-50 border-slate-100"}`}>
-                  <h3 className={`text-sm font-black uppercase tracking-widest mb-6 ${isDarkUi ? "text-slate-400" : "text-slate-500"}`}>Exam Registry</h3>
-                  <div className="grid sm:grid-cols-2 gap-4">
-                    {examTypes.map((row) => (
-                      <div
-                        key={row.id}
-                        className={`group relative overflow-hidden rounded-2xl border p-5 transition-all hover:scale-[1.02] ${
-                          isDarkUi ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200 shadow-sm"
-                        }`}
-                      >
-                        <div className="flex items-center gap-4">
-                           <div className={`h-12 w-12 rounded-xl flex items-center justify-center text-xl ${
-                             row.isSystem ? "bg-slate-100 text-slate-400" : "bg-indigo-50 text-indigo-600"
-                           }`}>
-                              {row.isSystem ? "⚙️" : "📝"}
-                           </div>
-                           <div>
-                              <p className={`text-sm font-black ${isDarkUi ? "text-slate-200" : "text-[#0c2340]"}`}>{row.displayName}</p>
-                              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mt-1">{row.examKey}</p>
-                           </div>
+                      <div>
+                        <div className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}>
+                          Section
                         </div>
-                        {row.isSystem && (
-                          <span className="absolute top-0 right-0 bg-slate-100 px-3 py-1 text-[8px] font-black uppercase text-slate-400 rounded-bl-xl">System</span>
-                        )}
-                        {!row.isSystem && (
-                          <button
-                            onClick={() => void onDeleteExamType(row)}
-                            className="absolute top-4 right-4 h-7 w-7 flex items-center justify-center rounded-lg bg-rose-500/10 text-rose-500 opacity-0 group-hover:opacity-100 transition-all hover:bg-rose-500 hover:text-white"
-                          >
-                            ×
-                          </button>
-                        )}
+                        <input
+                          className={inputBase}
+                          value={filterSection}
+                          onChange={(e) => setFilterSection(e.target.value)}
+                          placeholder="Filter by section…"
+                        />
                       </div>
-                    ))}
+                      <div>
+                        <div className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}>
+                          Subject
+                        </div>
+                        <input
+                          className={inputBase}
+                          value={filterSubject}
+                          onChange={(e) => setFilterSubject(e.target.value)}
+                          placeholder="Filter by subject…"
+                        />
+                      </div>
+                    </div>
                   </div>
-               </div>
-            </div>
-          )}
 
-          {activeTab === "schedule" && (
-            <div className="max-w-2xl mx-auto space-y-10">
-               <div className="text-center">
-                  <h3 className={`text-2xl font-black tracking-tight ${isDarkUi ? "text-white" : "text-[#0c2340]"}`}>Schedule New Assessment</h3>
-                  <p className="text-sm font-medium text-slate-500 mt-2">Publish an exam or test to the academic calendar.</p>
-               </div>
-               
-               <div className={`grid gap-8 p-10 rounded-[2.5rem] border ${
-                 isDarkUi ? "bg-slate-800/20 border-slate-700" : "bg-slate-50 border-slate-100"
-               }`}>
-                  <div className="grid sm:grid-cols-2 gap-6">
-                    <div className="space-y-4">
-                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Target Class</label>
-                       <select
-                          value={schedClassId}
-                          onChange={(e) => setSchedClassId(e.target.value)}
-                          className={inputClass}
+                  {/* Table */}
+                  {loading ? (
+                    <div className="p-6">
+                      <div className="h-24 rounded-2xl bg-slate-100 animate-pulse" />
+                    </div>
+                  ) : subjectItems.length === 0 ? (
+                    <div className="p-10 text-center">
+                      <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100 text-2xl">
+                        📚
+                      </div>
+                      <div className={classNames("text-base font-semibold", isDarkUi ? "text-white" : "text-slate-900")}>
+                        No subjects assigned yet
+                      </div>
+                      <div className={classNames("mt-1 text-sm", isDarkUi ? "text-slate-400" : "text-slate-600")}>
+                        Add subject assignments to start building your academic structure.
+                      </div>
+                    </div>
+                  ) : filteredSubjectItems.length === 0 ? (
+                    <div className="p-10 text-center">
+                      <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100 text-2xl">
+                        🔎
+                      </div>
+                      <div className={classNames("text-base font-semibold", isDarkUi ? "text-white" : "text-slate-900")}>
+                        No matches
+                      </div>
+                      <div className={classNames("mt-1 text-sm", isDarkUi ? "text-slate-400" : "text-slate-600")}>
+                        Try a different category/section/subject filter.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm min-w-[720px]">
+                        <thead className={classNames("border-b", isDarkUi ? "border-slate-800 bg-slate-900/40" : "border-slate-100 bg-slate-50")}>
+                          <tr>
+                            {["Category", "Section", "Subject", ""].map((h) => (
+                              <th
+                                key={h}
+                                className={classNames(
+                                  "px-5 py-3 text-left text-[12px] font-semibold uppercase tracking-wide",
+                                  isDarkUi ? "text-slate-400" : "text-slate-500",
+                                )}
+                              >
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className={classNames("divide-y", isDarkUi ? "divide-slate-900" : "divide-slate-50")}>
+                          {categories
+                            .filter((c) => groupedSubjects.has(c.id))
+                            .map((category) => {
+                              const rows = groupedSubjects.get(category.id) ?? [];
+                              return (
+                                <Fragment key={category.id}>
+                                  <tr className={classNames(isDarkUi ? "bg-slate-950/30" : "bg-white")}>
+                                    <td colSpan={4} className="px-5 py-3">
+                                      <span
+                                        className={classNames(
+                                          "inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ring-1",
+                                          categoryBadgeClass(category.name),
+                                        )}
+                                      >
+                                        {category.name}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                  {rows.map((row, idx) => {
+                                    const sectionLabel = (row.sectionName ?? "").trim() || "General";
+                                    return (
+                                      <tr
+                                        key={row.id}
+                                        className={classNames(
+                                          idx % 2 === 0 ? (isDarkUi ? "bg-slate-950/10" : "bg-white") : (isDarkUi ? "bg-slate-950/20" : "bg-slate-50/30"),
+                                          "hover:bg-slate-50",
+                                        )}
+                                      >
+                                        <td className={classNames("px-5 py-3", isDarkUi ? "text-slate-100" : "text-slate-900")}>
+                                          <span className="text-xs font-semibold">{category.name}</span>
+                                        </td>
+                                        <td className={classNames("px-5 py-3 text-slate-600")}>
+                                          <span className="text-sm text-slate-500">{sectionLabel}</span>
+                                        </td>
+                                        <td className={classNames("px-5 py-3 font-semibold", isDarkUi ? "text-slate-100" : "text-slate-900")}>
+                                          {row.subjectName.toUpperCase()}
+                                        </td>
+                                        <td className="px-5 py-3 text-right">
+                                          <div className="inline-flex items-center gap-2">
+                                            <button
+                                              type="button"
+                                              onClick={() => openEditSubjectModal(row)}
+                                              className="inline-flex items-center justify-center rounded-lg p-2 text-slate-600 hover:bg-slate-100 transition"
+                                              title="Edit subject assignment"
+                                              aria-label="Edit subject assignment"
+                                            >
+                                              ✏️
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => void onDeleteSubject(row.id)}
+                                              className="inline-flex items-center justify-center rounded-lg p-2 text-[#EF4444] hover:bg-red-50 transition"
+                                              title="Remove subject assignment"
+                                              aria-label="Remove subject assignment"
+                                            >
+                                              🗑️
+                                            </button>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </Fragment>
+                              );
+                            })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </section>
+
+                {/* Right (≈30%) */}
+                <aside className={classNames("lg:col-span-3 space-y-4")}>
+                  <section className={classNames(cardClass, "p-5")}>
+                    <div className={classNames("text-lg font-semibold", isDarkUi ? "text-white" : "text-slate-900")}>
+                      Summary
+                    </div>
+                    <div className={classNames("mt-1 text-sm", isDarkUi ? "text-slate-400" : "text-slate-600")}>
+                      Quick overview of assignments.
+                    </div>
+
+                    <div className="mt-4 space-y-3">
+                      <button
+                        type="button"
+                        onClick={() => setFilterCategoryId("")}
+                        className="w-full text-left rounded-xl border border-slate-200 bg-white px-4 py-3 hover:bg-slate-50 transition"
+                        title="Show all categories"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-800">🗂️ Total Categories</div>
+                          <div className="text-sm font-bold text-slate-900">{categories.length}</div>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">Click to clear category filter</div>
+                      </button>
+
+                      <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-800">📋 Total Assignments</div>
+                          <div className="text-sm font-bold text-slate-900">{subjectItems.length}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">
+                        Breakdown
+                      </div>
+                      <div className="mt-2 space-y-2">
+                        {categories.map((c) => {
+                          const count = subjectCountsByCategory.get(c.id) ?? 0;
+                          if (count === 0) return null;
+                          return (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => setFilterCategoryId(c.id)}
+                              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-left hover:bg-slate-50 transition"
+                              title="Filter table by this category"
+                            >
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm font-semibold text-slate-800">{c.name}</span>
+                                <span className="text-sm font-bold text-slate-900">{count}</span>
+                              </div>
+                              <div className="mt-1 text-xs text-slate-500">{c.name} → {count} subjects</div>
+                            </button>
+                          );
+                        })}
+                        {subjectItems.length === 0 ? (
+                          <div className="text-sm text-slate-500">No assignments to summarize yet.</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </section>
+                </aside>
+              </div>
+            ) : activeTab === "exams" ? (
+              <div className="grid gap-4 lg:grid-cols-10">
+                {/* Left (≈40%) */}
+                <section className={classNames(cardClass, "lg:col-span-4 p-5")}>
+                  <div className={classNames("text-lg font-semibold", isDarkUi ? "text-white" : "text-slate-900")}>
+                    Register Exam Type
+                  </div>
+                  <div className={classNames("mt-1 text-sm", isDarkUi ? "text-slate-400" : "text-slate-600")}>
+                    Add custom assessment cycles to the system.
+                  </div>
+
+                  <div className="mt-4 space-y-4">
+                    <div>
+                      <div className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}>
+                        Reference Key
+                      </div>
+                      <input
+                        value={newExamKey}
+                        onBlur={() => setExamFormTouched((p) => ({ ...p, key: true }))}
+                        onChange={(e) => setNewExamKey(e.target.value.toUpperCase())}
+                        placeholder="e.g. MOCK"
+                        className={inputBase}
+                      />
+                      <div className={classNames("mt-1 text-xs", isDarkUi ? "text-slate-400" : "text-slate-500")}>
+                        Use uppercase, no spaces. This is used internally.
+                      </div>
+                      {examFormTouched.key && examKeyError ? (
+                        <div className="mt-1 text-xs font-semibold text-[#EF4444]">{examKeyError}</div>
+                      ) : null}
+                    </div>
+
+                    <div>
+                      <div className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}>
+                        Display Label
+                      </div>
+                      <input
+                        value={newExamLabel}
+                        onBlur={() => setExamFormTouched((p) => ({ ...p, label: true }))}
+                        onChange={(e) => setNewExamLabel(e.target.value)}
+                        placeholder="e.g. Mock Examination"
+                        className={inputBase}
+                      />
+                      {examFormTouched.label && examLabelError ? (
+                        <div className="mt-1 text-xs font-semibold text-[#EF4444]">{examLabelError}</div>
+                      ) : null}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => void onAddExamType()}
+                      disabled={!canSubmitExamType}
+                      className="w-full rounded-lg px-4 py-3 text-sm font-semibold text-white shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed"
+                      style={{ backgroundImage: "linear-gradient(90deg, #3B3FD8 0%, #6366F1 100%)" }}
+                    >
+                      Register Exam Type
+                    </button>
+                  </div>
+                </section>
+
+                {/* Right (≈60%) */}
+                <section className={classNames(cardClass, "lg:col-span-6 p-5")}>
+                  <div className={classNames("text-lg font-semibold", isDarkUi ? "text-white" : "text-slate-900")}>
+                    Exam Registry
+                  </div>
+                  <div className={classNames("mt-1 text-sm", isDarkUi ? "text-slate-400" : "text-slate-600")}>
+                    All registered assessment cycles in the system.
+                  </div>
+
+                  {createdExamTypes.length === 0 ? (
+                    <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-8 text-center">
+                      <div className="text-2xl">📝</div>
+                      <div className="mt-2 text-sm font-semibold text-slate-800">No exam types registered yet. Add one to get started.</div>
+                    </div>
+                  ) : (
+                    <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {createdExamTypes.map((row) => (
+                        <div
+                          key={row.id}
+                          className="group relative rounded-2xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow-md transition"
                         >
-                          <option value="">Select class...</option>
-                          {schedClassOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                        </select>
-                        {schedClassOptions.length === 0 && (
-                          <p className="text-[10px] font-bold text-rose-500 uppercase tracking-tighter">No subject assignments found.</p>
+                          {!row.isSystem ? (
+                            <button
+                              type="button"
+                              onClick={() => void onDeleteExamType(row)}
+                              className="absolute right-3 top-3 rounded-lg p-2 text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-slate-50 hover:text-[#EF4444] transition"
+                              aria-label="Delete exam type"
+                              title="Delete exam type"
+                            >
+                              🗑️
+                            </button>
+                          ) : null}
+
+                          <div className="flex items-center gap-3">
+                            <div className="h-10 w-10 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center">
+                              📄
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-semibold text-slate-900 truncate">{row.displayName}</div>
+                              <div className="mt-1 text-xs font-mono text-slate-500">{row.examKey}</div>
+                            </div>
+                          </div>
+
+                          {row.isSystem ? (
+                            <div className="mt-3 inline-flex rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 ring-1 ring-slate-200">
+                              System
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </div>
+            ) : (
+              <div className="mx-auto max-w-[680px]">
+                <section className={classNames(cardClass, "p-5")}>
+                  <div className={classNames("text-lg font-semibold", isDarkUi ? "text-white" : "text-slate-900")}>
+                    Schedule New Assessment
+                  </div>
+                  <div className={classNames("mt-1 text-sm", isDarkUi ? "text-slate-400" : "text-slate-600")}>
+                    Publish an exam or test to the academic calendar.
+                  </div>
+
+                  <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label
+                        htmlFor="sched-category"
+                        className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}
+                      >
+                        Category
+                      </label>
+                      <select
+                        id="sched-category"
+                        className={classNames(inputBase, "mt-1")}
+                        value={schedCategoryId ?? ""}
+                        onChange={(e) => setSchedCategoryId(e.target.value ? Number(e.target.value) : null)}
+                        aria-label="Category"
+                      >
+                        {scheduleCategoryOptions.length === 0 ? <option value="">No categories</option> : null}
+                        {scheduleCategoryOptions.map((c) => (
+                          <option key={c.id} value={String(c.id)}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="sched-class"
+                        className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}
+                      >
+                        Class
+                      </label>
+                      <select
+                        id="sched-class"
+                        className={classNames(inputBase, "mt-1")}
+                        value={schedClassId}
+                        onChange={(e) => {
+                          setSchedClassId(e.target.value);
+                          setSchedSubject("");
+                        }}
+                        aria-label="Class"
+                      >
+                        <option value="">Select a class...</option>
+                        {scheduleClassOptions.map((c) => (
+                          <option key={c.id} value={String(c.id)}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <span
+                        className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}
+                      >
+                        Term
+                      </span>
+                      <div
+                        className={classNames(
+                          inputBase,
+                          "mt-1 flex items-center justify-between cursor-not-allowed opacity-80 select-none",
                         )}
+                        role="group"
+                        aria-label="Term from system"
+                      >
+                        <span>{viewingTerm}</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-60">System</span>
+                      </div>
                     </div>
-                    <div className="space-y-4">
-                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Assessment Cycle</label>
-                       <select
-                          value={schedExamType}
-                          onChange={(e) => setSchedExamType(e.target.value)}
-                          className={inputClass}
-                        >
-                          <option value="">Select type...</option>
-                          {createdExamTypes.map((t) => <option key={t.examKey} value={t.examKey}>{t.displayName}</option>)}
-                        </select>
+
+                    <div>
+                      <span
+                        className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}
+                      >
+                        Academic Year
+                      </span>
+                      <div
+                        className={classNames(
+                          inputBase,
+                          "mt-1 flex items-center justify-between cursor-not-allowed opacity-80 select-none",
+                        )}
+                        role="group"
+                        aria-label="Academic year from system"
+                      >
+                        <span>{viewingAcademicYear}</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-60">System</span>
+                      </div>
                     </div>
-                    <div className="space-y-4">
-                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Subject Domain</label>
-                       <input
-                          value={schedSubject}
-                          onChange={(e) => setSchedSubject(e.target.value)}
-                          placeholder="e.g. Mathematics"
-                          className={inputClass}
-                        />
+
+                    <div>
+                      <label
+                        htmlFor="sched-exam-type"
+                        className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}
+                      >
+                        Assessment Cycle
+                      </label>
+                      <select
+                        id="sched-exam-type"
+                        className={classNames(inputBase, "mt-1")}
+                        value={schedExamType}
+                        onChange={(e) => setSchedExamType(e.target.value)}
+                        aria-label="Assessment cycle"
+                      >
+                        <option value="">Select exam type...</option>
+                        {createdExamTypes
+                          .filter((t) => t.isActive)
+                          .map((t) => (
+                            <option key={t.examKey} value={t.examKey}>
+                              {t.displayName}
+                            </option>
+                          ))}
+                      </select>
                     </div>
-                    <div className="space-y-4">
-                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Scheduled Date</label>
-                       <input
-                          type="date"
-                          value={schedDate}
-                          onChange={(e) => setSchedDate(e.target.value)}
-                          className={inputClass}
-                        />
+
+                    <div>
+                      <label
+                        htmlFor="sched-subject"
+                        className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}
+                      >
+                        Subject
+                      </label>
+                      <select
+                        id="sched-subject"
+                        className={classNames(inputBase, "mt-1")}
+                        value={schedSubject}
+                        onChange={(e) => setSchedSubject(e.target.value)}
+                        aria-label="Subject"
+                        disabled={!schedClassId}
+                      >
+                        <option value="">All Subjects / General</option>
+                        {scheduleSubjectSelectOptions.map((row) => {
+                          const sf = String(row.shortForm ?? "").trim();
+                          const label = sf ? `${row.subjectName} (${sf})` : row.subjectName;
+                          return (
+                            <option key={`${row.subjectName}-${row.id}`} value={row.subjectName}>
+                              {label}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      {!selectedClassHasAssignments && schedClassId ? (
+                        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="text-sm font-semibold">
+                              No subject assignments found for this class. Please configure subjects first.
+                              <button
+                                type="button"
+                                onClick={() => setActiveTab("subjects")}
+                                className="ml-2 text-sm font-semibold text-[#3B3FD8] hover:underline"
+                              >
+                                Go to Subject Assignment
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <label
+                        htmlFor="sched-calendar"
+                        className={classNames("text-[12px] font-semibold uppercase tracking-wide", isDarkUi ? "text-slate-400" : "text-slate-500")}
+                      >
+                        Scheduled Date
+                      </label>
+                      <div id="sched-calendar" className="mt-1">
+                        <CalendarPicker value={schedDate} onChange={setSchedDate} placeholder="Pick a date…" />
+                      </div>
                     </div>
                   </div>
 
                   <button
-                    disabled={schedBusy}
+                    type="button"
                     onClick={() => void onScheduleExam()}
-                    className="h-14 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-sm font-black uppercase tracking-widest shadow-2xl shadow-blue-600/30 transition-all hover:-translate-y-1 active:translate-y-0 disabled:opacity-50"
+                    disabled={
+                      schedBusy ||
+                      schedCategoryId == null ||
+                      !schedClassId ||
+                      !schedExamType.trim() ||
+                      !schedDate.trim()
+                    }
+                    className="mt-5 w-full rounded-lg px-4 py-3 text-sm font-semibold text-white shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    style={{ backgroundImage: "linear-gradient(90deg, #3B3FD8 0%, #6366F1 100%)" }}
                   >
-                    {schedBusy ? "Processing..." : "Publish Assessment Schedule"}
+                    {schedBusy ? "Publishing…" : "Publish Assessment Schedule"}
                   </button>
-               </div>
-            </div>
-          )}
+                </section>
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* Add Subject Modal */}
+      {subjectModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setSubjectModalOpen(false)}
+            aria-hidden
+          />
+          <div className={classNames("relative w-full max-w-lg rounded-2xl bg-white shadow-xl border border-slate-200", "animate-in fade-in zoom-in-95 duration-200")}>
+            <div className="p-5 border-b border-slate-100">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-lg font-semibold text-slate-900">{editingSubjectId ? "Edit Subject" : "Add Subject"}</div>
+                  <div className="mt-1 text-sm text-slate-600">
+                    {editingSubjectId ? "Update the saved subject assignment." : "Assign a subject to a category and section."}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSubjectModalOpen(false)}
+                  className="rounded-lg p-2 text-slate-500 hover:bg-slate-50 transition"
+                  aria-label="Close"
+                  title="Close"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div>
+                <div className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Category</div>
+                <select
+                  className={inputBase}
+                  value={subjectCategoryId ?? ""}
+                  onChange={(e) => setSubjectCategoryId(e.target.value ? Number(e.target.value) : null)}
+                >
+                  <option value="">Select a category…</option>
+                  {categories.map((c) => (
+                    <option key={c.id} value={String(c.id)}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Section</div>
+                <select
+                  className={inputBase}
+                  value={subjectSectionName}
+                  onChange={(e) => setSubjectSectionName(e.target.value)}
+                  disabled={!subjectCategoryId}
+                >
+                  <option value="">{subjectCategoryId ? "General" : "Select category first…"}</option>
+                  {sectionOptionsForSelectedCategory.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Subject</div>
+                <input
+                  className={inputBase}
+                  value={subjectName}
+                  onChange={(e) => setSubjectName(e.target.value)}
+                  placeholder="e.g. Mathematics"
+                />
+              </div>
+
+              <div>
+                <div className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Short Form</div>
+                <input
+                  className={inputBase}
+                  value={subjectShortForm}
+                  onChange={(e) => setSubjectShortForm(e.target.value.toUpperCase())}
+                  placeholder="e.g. MTH"
+                  maxLength={5}
+                />
+                <div className="mt-1 text-xs text-slate-500">
+                  This abbreviation will appear as the column header in the results table.
+                </div>
+              </div>
+            </div>
+
+            <div className="p-5 border-t border-slate-100 flex flex-col sm:flex-row gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => setSubjectModalOpen(false)}
+                className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void onAddSubject()}
+                disabled={!subjectCategoryId || !subjectName.trim() || !subjectShortForm.trim()}
+                className="rounded-lg px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ backgroundColor: "#22C55E" }}
+              >
+                {editingSubjectId ? "Save Changes" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1456,17 +2531,20 @@ function TabBtn({ active, onClick, label, icon, isDarkUi }: {
   icon: string;
   isDarkUi: boolean;
 }) {
+  const cls = [
+    "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-all",
+    active
+      ? (isDarkUi ? "bg-slate-800 text-white" : "bg-white text-slate-900 shadow-sm ring-1 ring-slate-200")
+      : (isDarkUi ? "text-slate-400 hover:text-slate-200" : "text-slate-600 hover:text-slate-900"),
+  ].join(" ");
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-3 rounded-xl px-5 py-2.5 text-xs font-black transition-all ${
-        active 
-          ? isDarkUi ? "bg-slate-700 text-white shadow-lg shadow-slate-950/20" : "bg-white text-[#0c2340] shadow-sm"
-          : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-      }`}
+      className={cls}
+      title={`Switch to ${label} view`}
     >
-      <span className="text-base">{icon}</span>
-      {label}
+      <span className="text-base leading-none">{icon}</span>
+      <span className={active ? "font-bold" : "font-semibold"}>{label}</span>
     </button>
   );
 }
@@ -1505,7 +2583,10 @@ function GradingStandardsPage() {
                 <div key={s.id} className="group rounded-2xl border border-[#ebe4d9]/60 bg-white/40 p-5 transition-all hover:bg-white/80">
                   <div className="mb-4 flex items-center justify-between">
                     <h3 className="text-lg font-black text-[#2d3436]">{s.name}</h3>
-                    <button className="text-[10px] font-black uppercase tracking-widest text-[#3498db]">Edit Policy</button>
+                    <button 
+                      className="text-[10px] font-black uppercase tracking-widest text-[#3498db]"
+                      title="Edit the thresholds and rules for this grading policy"
+                    >Edit Policy</button>
                   </div>
                   <div className="grid grid-cols-4 gap-4 text-center">
                     {Object.entries(s.thresholds).slice(0, 4).map(([grade, score]) => (
@@ -1538,7 +2619,10 @@ function GradingStandardsPage() {
             <p className="mt-3 max-w-sm text-sm font-medium text-[#636e72]">
               Define custom grading logic for Primary or Secondary sections. Changes here will instantly update performance reports across the entire school.
             </p>
-            <button className="mt-10 w-full rounded-2xl bg-gradient-to-br from-[#3498db] to-[#2980b9] py-4 text-sm font-black uppercase tracking-widest text-white shadow-xl transition hover:brightness-110 active:scale-95">
+            <button 
+              className="mt-10 w-full rounded-2xl bg-gradient-to-br from-[#3498db] to-[#2980b9] py-4 text-sm font-black uppercase tracking-widest text-white shadow-xl transition hover:brightness-110 active:scale-95"
+              title="Create a new grading policy using a standardized template"
+            >
               Initialize New Template
             </button>
             <p className="mt-4 text-[10px] font-bold uppercase tracking-widest text-[#636e72]">Last updated 2 days ago</p>
@@ -1593,15 +2677,18 @@ function ReportRemarksPage() {
 }
 
 function ExamSchedulePage() {
+  const { viewingAcademicYear } = useTermContext();
   const [exams, setExams] = useState<UpcomingExamRow[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     setLoading(true);
     void fetchExams()
-      .then(setExams)
+      .then((rows) =>
+        setExams(rows.filter((ex) => String(ex.examDate ?? "").startsWith(viewingAcademicYear))),
+      )
       .finally(() => setLoading(false));
-  }, []);
+  }, [viewingAcademicYear]);
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-4 space-y-6 duration-700">
@@ -1641,7 +2728,10 @@ function ExamSchedulePage() {
                     </span>
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <button className="rounded-full bg-white/80 px-4 py-1.5 text-xs font-black text-[#3498db] shadow-sm hover:bg-white transition active:scale-95">
+                    <button 
+                      className="rounded-full bg-white/80 px-4 py-1.5 text-xs font-black text-[#3498db] shadow-sm hover:bg-white transition active:scale-95"
+                      title="Update the details of this scheduled examination"
+                    >
                       Edit
                     </button>
                   </td>
@@ -1703,14 +2793,16 @@ function PromotionPage() {
 }
 
 function LearnsReportPage() {
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
   const [classes, setClasses] = useState<
     Array<{ id: number; name: string; categoryId: number | null; categoryName: string | null }>
   >([]);
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null);
   const [selectedClassId, setSelectedClassId] = useState<number | null>(null);
-  const [term, setTerm] = useState("Term 1");
+  const [selectedSubject, setSelectedSubject] = useState<string>("");
   const [examType, setExamType] = useState<ExamType>("");
   const [examTypes, setExamTypes] = useState<string[]>([]);
+  const [subjectItems, setSubjectItems] = useState<SubjectAssignmentConfigRow[]>([]);
   const [marksheet, setMarksheet] = useState<GeneratedMarksheetPayload | null>(null);
   const [, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -1718,25 +2810,41 @@ function LearnsReportPage() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    void fetchResultEntryOptions()
-      .then((data) => {
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await fetchResultEntryOptions();
         if (cancelled) return;
         setClasses(data.classes);
-        const categoryIds = Array.from(new Set(data.classes.map((x) => x.categoryId).filter((x): x is number => x != null)));
+        const categoryIds = Array.from(
+          new Set(data.classes.map((x) => x.categoryId).filter((x): x is number => x != null)),
+        );
         setSelectedCategoryId(categoryIds[0] ?? null);
-        setTerm(data.terms[0] ?? "Term 1");
         const nonAssessmentTypes = data.examTypes.filter((x) => x !== "ASSESSMENT");
         setExamTypes(nonAssessmentTypes);
         setExamType(nonAssessmentTypes[0] ?? data.examTypes[0] ?? "");
-      })
-      .catch((e) => {
+      } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load class list");
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const payload = await getSubjectConfigsCached();
+        if (!cancelled) setSubjectItems(payload.items);
+      } catch {
+        if (!cancelled) setSubjectItems([]);
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -1759,6 +2867,21 @@ function LearnsReportPage() {
     [classes, selectedCategoryId],
   );
 
+  const selectedClassRow = useMemo(() => {
+    if (selectedClassId == null) return null;
+    return classes.find((c) => c.id === selectedClassId) ?? null;
+  }, [classes, selectedClassId]);
+
+  const marksheetSubjectNameOptions = useMemo(() => {
+    const catId = selectedClassRow?.categoryId ?? null;
+    if (catId == null) return [];
+    const names = new Set<string>();
+    for (const row of subjectItems) {
+      if (row.classCategoryId === catId) names.add(row.subjectName);
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [selectedClassRow?.categoryId, subjectItems]);
+
   useEffect(() => {
     if (selectedCategoryId == null) {
       setSelectedClassId(null);
@@ -1768,15 +2891,26 @@ function LearnsReportPage() {
     if (!stillValid) setSelectedClassId(classOptions[0]?.id ?? null);
   }, [selectedCategoryId, classOptions, selectedClassId]);
 
+  useEffect(() => {
+    setSelectedSubject("");
+  }, [selectedClassId]);
+
+  const displaySubjects = useMemo(() => {
+    if (!marksheet) return [];
+    if (!selectedSubject.trim()) return marksheet.subjects;
+    return marksheet.subjects.filter((s) => s === selectedSubject);
+  }, [marksheet, selectedSubject]);
+
   async function onGenerateMarksheet() {
     if (!selectedClassId || !examType) return;
     setGenerating(true);
     setError(null);
     try {
       const item = await generateClassMarksheet({
-        term,
+        term: viewingTerm,
         examType,
         classRoomId: selectedClassId,
+        academicYear: viewingAcademicYear,
       });
       setMarksheet(item);
     } catch (e) {
@@ -1786,6 +2920,9 @@ function LearnsReportPage() {
       setGenerating(false);
     }
   }
+
+  const systemFieldClass =
+    "neo-inset-field flex w-full items-center justify-between rounded-xl px-3 py-3 text-sm font-bold text-[#2d3436] cursor-not-allowed opacity-90 select-none";
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-4 space-y-6 duration-700">
@@ -1797,13 +2934,17 @@ function LearnsReportPage() {
       </header>
 
       <div className="neo-card p-6">
-        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-7 lg:items-end">
           <div className="space-y-2">
-            <label className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Section</label>
+            <label htmlFor="learns-category" className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">
+              Category
+            </label>
             <select
+              id="learns-category"
               value={selectedCategoryId ?? ""}
               onChange={(e) => setSelectedCategoryId(e.target.value ? Number(e.target.value) : null)}
               className="neo-inset-field w-full rounded-xl px-4 py-3 text-sm font-bold text-[#2d3436] outline-none"
+              aria-label="Category"
             >
               {categoryOptions.length === 0 ? <option value="">No categories</option> : null}
               {categoryOptions.map((x) => (
@@ -1814,11 +2955,15 @@ function LearnsReportPage() {
             </select>
           </div>
           <div className="space-y-2">
-            <label className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Class</label>
+            <label htmlFor="learns-class" className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">
+              Class
+            </label>
             <select
+              id="learns-class"
               value={selectedClassId ?? ""}
               onChange={(e) => setSelectedClassId(e.target.value ? Number(e.target.value) : null)}
               className="neo-inset-field w-full rounded-xl px-4 py-3 text-sm font-bold text-[#2d3436] outline-none"
+              aria-label="Class"
             >
               {classOptions.length === 0 ? <option value="">No classes</option> : null}
               {classOptions.map((x) => (
@@ -1829,38 +2974,74 @@ function LearnsReportPage() {
             </select>
           </div>
           <div className="space-y-2">
-            <label className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Term & Type</label>
-            <div className="flex gap-2">
-              <select
-                value={term}
-                onChange={(e) => setTerm(e.target.value)}
-                className="neo-inset-field flex-1 rounded-xl px-3 py-3 text-sm font-bold text-[#2d3436] outline-none"
-              >
-                {["Term 1", "Term 2", "Term 3"].map((x) => (
-                  <option key={x} value={x}>
-                    {x}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={examType}
-                onChange={(e) => setExamType(e.target.value as ExamType)}
-                className="neo-inset-field flex-1 rounded-xl px-3 py-3 text-sm font-bold text-[#2d3436] outline-none"
-              >
-                {examTypes.map((x) => (
-                  <option key={x} value={x}>
-                    {x}
-                  </option>
-                ))}
-              </select>
+            <span className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Term</span>
+            <div className={systemFieldClass} role="group" aria-label="Term (from system)">
+              <span className="flex items-center gap-1.5">
+                <svg className="h-3.5 w-3.5 shrink-0 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                {viewingTerm}
+              </span>
+              <span className="text-[10px] font-bold uppercase tracking-wider opacity-60">System</span>
             </div>
           </div>
-          <div className="flex items-end">
+          <div className="space-y-2">
+            <span className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">Academic Year</span>
+            <div className={systemFieldClass} role="group" aria-label="Academic year (from system)">
+              <span className="flex items-center gap-1.5">
+                <svg className="h-3.5 w-3.5 shrink-0 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                {viewingAcademicYear}
+              </span>
+              <span className="text-[10px] font-bold uppercase tracking-wider opacity-60">System</span>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="learns-exam-type" className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">
+              Exam Type
+            </label>
+            <select
+              id="learns-exam-type"
+              value={examType}
+              onChange={(e) => setExamType(e.target.value as ExamType)}
+              className="neo-inset-field w-full rounded-xl px-3 py-3 text-sm font-bold text-[#2d3436] outline-none"
+              aria-label="Exam type"
+            >
+              {examTypes.map((x) => (
+                <option key={x} value={x}>
+                  {x}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="learns-subject" className="text-[10px] font-black uppercase tracking-widest text-[#636e72]">
+              Subject
+            </label>
+            <select
+              id="learns-subject"
+              value={selectedSubject}
+              onChange={(e) => setSelectedSubject(e.target.value)}
+              className="neo-inset-field w-full rounded-xl px-3 py-3 text-sm font-bold text-[#2d3436] outline-none"
+              aria-label="Subject filter"
+              disabled={!selectedClassId}
+            >
+              <option value="">All Subjects</option>
+              {marksheetSubjectNameOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-end sm:col-span-2 lg:col-span-1">
             <button
               type="button"
               onClick={() => void onGenerateMarksheet()}
               disabled={generating || !selectedClassId || !examType}
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-br from-[#3498db] to-[#2980b9] px-6 py-3.5 text-sm font-black text-white shadow-lg transition hover:brightness-110 active:scale-95 disabled:opacity-50"
+              aria-label="Generate marksheet"
             >
               {generating ? (
                 <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24">
@@ -1891,7 +3072,7 @@ function LearnsReportPage() {
               </h2>
               <p className="mt-0.5 text-xs font-bold text-[#3498db]">{marksheet.rows.length} Learners Ranked</p>
             </div>
-            <button className="flex items-center gap-2 rounded-full bg-white/80 px-4 py-2 text-xs font-black text-[#2d3436] shadow-sm hover:bg-white transition">
+            <button type="button" className="flex items-center gap-2 rounded-full bg-white/80 px-4 py-2 text-xs font-black text-[#2d3436] shadow-sm hover:bg-white transition">
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
               </svg>
@@ -1904,7 +3085,7 @@ function LearnsReportPage() {
                 <tr>
                   <th className="px-6 py-4">Rank</th>
                   <th className="px-6 py-4">Learner</th>
-                  {marksheet.subjects.map((subject) => (
+                  {displaySubjects.map((subject) => (
                     <th key={subject} className="px-6 py-4 text-right">
                       {subject}
                     </th>
@@ -1916,23 +3097,31 @@ function LearnsReportPage() {
                 {marksheet.rows.map((row) => (
                   <tr key={row.studentId} className="group transition-colors hover:bg-white/40">
                     <td className="px-6 py-4">
-                      <div className={`flex h-7 w-7 items-center justify-center rounded-full font-black text-xs ${
-                        row.position === 1 ? 'bg-yellow-100 text-yellow-700' : 
-                        row.position === 2 ? 'bg-slate-100 text-slate-600' : 
-                        row.position === 3 ? 'bg-orange-100 text-orange-700' : 
-                        'text-[#636e72]'
-                      }`}>
+                      <div
+                        className={`flex h-7 w-7 items-center justify-center rounded-full font-black text-xs ${
+                          row.position === 1
+                            ? "bg-yellow-100 text-yellow-700"
+                            : row.position === 2
+                              ? "bg-slate-100 text-slate-600"
+                              : row.position === 3
+                                ? "bg-orange-100 text-orange-700"
+                                : "text-[#636e72]"
+                        }`}
+                      >
                         {row.position}
                       </div>
                     </td>
                     <td className="px-6 py-4 font-bold text-[#2d3436]">{row.fullName}</td>
-                    {marksheet.subjects.map((subject) => (
+                    {displaySubjects.map((subject) => (
                       <td key={`${row.studentId}-${subject}`} className="px-6 py-4 text-right font-black text-[#2d3436]">
                         {row.marksBySubject[subject] ?? "-"}
                       </td>
                     ))}
                     <td className="px-6 py-4 text-right">
-                      <span className="rounded-lg bg-[#3498db]/10 px-3 py-1.5 font-black text-[#3498db]">
+                      <span
+                        className="rounded-lg bg-[#3498db]/10 px-3 py-1.5 font-black text-[#3498db]"
+                        title="Total from full marksheet; may not match visible columns when a subject filter is applied."
+                      >
                         {row.totalMarks}
                       </span>
                     </td>
@@ -1944,13 +3133,13 @@ function LearnsReportPage() {
         </div>
       ) : (
         <div className="neo-card border-dashed border-2 border-[#ebe4d9] p-20 text-center">
-           <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-[#ebe4d9]/30 text-[#636e72] mb-4">
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-[#ebe4d9]/30 text-[#636e72]">
             <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
             </svg>
           </div>
           <p className="font-black text-[#2d3436]">Ready to Generate</p>
-          <p className="text-sm font-medium text-[#636e72] mt-1">Select a class and exam type above to view the performance marksheet.</p>
+          <p className="mt-1 text-sm font-medium text-[#636e72]">Select a class and exam type above to view the performance marksheet.</p>
         </div>
       )}
     </div>

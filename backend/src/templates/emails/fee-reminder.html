@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/><title>Fee Reminder</title>
+<style>
+  body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f7fb;margin:0;padding:24px;}
+  .container{max-width:540px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.08);}
+  .header{background:linear-gradient(135deg,#7c2d12 0%,#ea580c 100%);padding:32px 40px;text-align:center;}
+  .header h1{color:#fff;font-size:22px;margin:0;font-weight:700;}
+  .body{padding:40px;color:#374151;line-height:1.7;}
+  .body p{margin:0 0 14px;font-size:15px;}
+  .balance-box{background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:20px;margin:20px 0;text-align:center;}
+  .balance-box .amount{font-size:28px;font-weight:800;color:#c2410c;}
+  .balance-box .label{font-size:13px;color:#9a3412;margin-top:4px;}
+  .info-row{display:flex;justify-content:space-between;font-size:14px;padding:6px 0;border-bottom:1px solid #f3f4f6;}
+  .cta-wrapper{text-align:center;margin:28px 0;}
+  .cta-btn{display:inline-block;background:#ea580c;color:#fff !important;text-decoration:none;padding:14px 36px;border-radius:8px;font-weight:700;font-size:15px;}
+  .footer{background:#f9fafb;padding:20px 40px;text-align:center;font-size:12px;color:#9ca3af;border-top:1px solid #e5e7eb;}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header"><h1>{{school_name}} — Fee Reminder</h1></div>
+  <div class="body">
+    <p>Dear Parent/Guardian,</p>
+    <p>This is a friendly reminder that the following fee balance is outstanding for:</p>
+    <div class="info-row"><span><strong>Student:</strong></span><span>{{student_name}}</span></div>
+    <div class="info-row"><span><strong>Class:</strong></span><span>{{class_name}}</span></div>
+    <div class="info-row"><span><strong>Term:</strong></span><span>{{term}}</span></div>
+    <div class="info-row"><span><strong>Due Date:</strong></span><span>{{due_date}}</span></div>
+    <div class="balance-box">
+      <div class="amount">{{currency}} {{outstanding_amount}}</div>
+      <div class="label">Outstanding Balance</div>
+    </div>
+    <p>Please log in to the parent portal to view your full invoice and make a payment.</p>
+    <div class="cta-wrapper">
+      <a href="{{portal_url}}" class="cta-btn">View Invoice</a>
+    </div>
+    <p style="font-size:13px;color:#6b7280;">If you have already made this payment, please disregard this notice. Contact the school bursar if you have any questions.</p>
+  </div>
+  <div class="footer"><p>{{school_name}} · {{school_address}} · {{school_phone}}</p></div>
+</div>
+</body>
+</html>

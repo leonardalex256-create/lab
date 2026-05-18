@@ -1,19 +1,28 @@
 import { formatCurrencyUGX, formatReceiptDate } from "../shared/financeFormat";
 import type { StudentPaymentReceipt } from "../shared/financeTypes";
 import { useTheme } from "../../../theme/ThemeProvider";
+import { numberToWords, toSentenceCase } from "../shared/numberToWords";
+import { useSchoolConfig } from "../../../context/SchoolConfigContext";
 
 export function StudentReceiptPage({ receipt }: { receipt: StudentPaymentReceipt }) {
   const { resolvedTheme } = useTheme();
   const isDarkUi = resolvedTheme === "dark" || resolvedTheme === "tinted-dark";
+  const config = useSchoolConfig();
+  const amountWords = `${toSentenceCase(numberToWords(Math.round(Number(receipt.amountPaid) || 0)))} Uganda shillings only`;
+  const generatedBy = receipt.generatedByName?.trim() || "Account User";
 
   return (
-    <section className={`relative mx-auto max-w-4xl overflow-hidden rounded-[2.5rem] border p-8 shadow-2xl transition-all sm:p-12 print:shadow-none print:border-slate-200 print:rounded-none ${isDarkUi ? "bg-slate-900 border-slate-700 shadow-slate-950/50" : "bg-white border-slate-100 shadow-slate-200/50"
+    <section className={`relative mx-auto max-w-4xl overflow-hidden rounded-[2.5rem] border p-8 shadow-2xl transition-all sm:p-12 print:shadow-none print:border-slate-200 print:rounded-none print:min-h-[148mm] ${isDarkUi ? "bg-slate-900 border-slate-700 shadow-slate-950/50" : "bg-white border-slate-100 shadow-slate-200/50"
       }`}>
       {/* Premium Watermark */}
       <div className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-[0.03] print:opacity-[0.05]">
         <div className="flex flex-col items-center">
-          <span className="text-[10rem] font-black tracking-tighter [transform:rotate(-25deg)]">QUEENS</span>
-          <span className="text-[4rem] font-black uppercase tracking-[2em] mt-[-2rem] [transform:rotate(-25deg)]">OFFICIAL</span>
+          <span className="text-[10rem] font-black tracking-tighter [transform:rotate(-25deg)]">
+            {config.watermarkText}
+          </span>
+          <span className="text-[4rem] font-black uppercase tracking-[2em] mt-[-2rem] [transform:rotate(-25deg)]">
+            {config.shortName}
+          </span>
         </div>
       </div>
 
@@ -22,17 +31,17 @@ export function StudentReceiptPage({ receipt }: { receipt: StudentPaymentReceipt
         <header className="flex flex-col sm:flex-row items-start justify-between gap-8 border-b pb-10 border-dashed border-slate-200">
           <div className="flex items-center gap-6">
             <div className={`h-24 w-24 shrink-0 overflow-hidden rounded-3xl border p-2 shadow-sm ${isDarkUi ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"}`}>
-              <img src="/school-badge-v2.png" alt="School Badge" className="h-full w-full object-contain" />
+              <img src={config.badgeImagePath} alt="School Badge" className="h-full w-full object-contain" />
             </div>
             <div>
               <h1 className={`text-2xl font-black tracking-tight leading-none ${isDarkUi ? "text-white" : "text-[#0c2340]"}`}>
-                QUEENS NURSERY & PRIMARY SCHOOL
+                {config.schoolName}
               </h1>
               <p className="mt-2 text-xs font-bold uppercase tracking-widest text-teal-600">Official Payment Receipt</p>
               <div className="mt-4 space-y-1 text-[11px] font-medium text-slate-500">
-                <p>Kitebi Star, After Trading Centre, Kampala</p>
-                <p>P.O. BOX 9107 | queensprimaryschool13@gmail.com</p>
-                <p>+256 782 333 908 · +256 750 775 572</p>
+                <p>{config.address}</p>
+                <p>{`P.O. BOX ${config.poBox} | ${config.email}`}</p>
+                <p>{`${config.phone1}${config.phone2 ? ` · ${config.phone2}` : ""}`}</p>
               </div>
             </div>
           </div>
@@ -110,11 +119,25 @@ export function StudentReceiptPage({ receipt }: { receipt: StudentPaymentReceipt
             }`}>
             <div>
               <h4 className="text-lg font-black text-emerald-600">Amount Paid</h4>
-              <p className="text-xs font-medium text-slate-400">Payment successfully recorded and allocated.</p>
+              <p className="text-xs font-medium text-slate-400">Payment successfully recorded.</p>
             </div>
             <span className="text-2xl font-black text-emerald-600 tabular-nums">
               {formatCurrencyUGX(receipt.amountPaid)}
             </span>
+          </div>
+
+          {/* Prominent amount-in-words strip */}
+          <div
+            className={`px-8 py-5 border-b border-dashed border-slate-200 ${
+              isDarkUi ? "bg-emerald-900/30" : "bg-emerald-100/80"
+            }`}
+          >
+            <p className="text-[11px] font-black uppercase tracking-[0.2em] text-emerald-700">
+              Amount In Words
+            </p>
+            <p className={`mt-2 text-base font-black leading-relaxed ${isDarkUi ? "text-emerald-200" : "text-emerald-900"}`}>
+              {amountWords}
+            </p>
           </div>
 
           {/* Balance Row */}
@@ -122,7 +145,7 @@ export function StudentReceiptPage({ receipt }: { receipt: StudentPaymentReceipt
             }`}>
             <div>
               <h4 className={`text-base font-black ${isDarkUi ? "text-white" : "text-[#0c2340]"}`}>Outstanding Balance</h4>
-              <p className="text-xs font-medium text-slate-400">Remaining fees for the current term.</p>
+              <p className="text-xs font-medium text-slate-400">Outstanding balance.</p>
             </div>
             <span className={`text-xl font-black tabular-nums ${isDarkUi ? "text-slate-200" : "text-[#0c2340]"}`}>
               {receipt.outstandingAfter === 0 ? "CLEAR" : formatCurrencyUGX(receipt.outstandingAfter)}
@@ -146,18 +169,21 @@ export function StudentReceiptPage({ receipt }: { receipt: StudentPaymentReceipt
 
         {/* Formal Footer */}
         <footer className="mt-16 pt-10 border-t border-slate-200">
-          <div className="grid gap-8 sm:grid-cols-3">
+          <div className="grid gap-8 sm:grid-cols-2">
             <SignatureBlock label="School Stamp & Seal" isDarkUi={isDarkUi} />
             <SignatureBlock label="Bursar's Signature" isDarkUi={isDarkUi} />
-            <SignatureBlock label="Parent's Acknowledgement" isDarkUi={isDarkUi} />
+          </div>
+          <div className={`mt-8 rounded-2xl border px-5 py-4 ${isDarkUi ? "border-slate-700 bg-slate-800/30" : "border-slate-200 bg-slate-50/60"}`}>
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Generated By</p>
+            <p className={`mt-1 text-sm font-black ${isDarkUi ? "text-slate-200" : "text-[#0c2340]"}`}>{generatedBy}</p>
           </div>
 
           <div className="mt-12 text-center">
             <p className="text-sm font-black tracking-tight text-slate-400 italic">
-              "Build For The Future"
+              {config.tagline}
             </p>
             <p className="mt-2 text-[10px] font-medium text-slate-400 uppercase tracking-[0.3em]">
-              All rights reserved &copy;queensnursery&primaryschool.
+              {`All rights reserved ©${config.schoolName.toLowerCase().replace(/\s+/g, "")}.`}
             </p>
           </div>
         </footer>

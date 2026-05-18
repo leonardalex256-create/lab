@@ -1,10 +1,19 @@
 import { Router } from "express";
 import bcrypt from "bcrypt";
 import { z } from "zod";
+import { Op } from "sequelize";
 import type { Config } from "../config.js";
 import { loadUserEmailAndTwoFactor, loadUserMeFields } from "../db/loadUserSafe.js";
-import { User, RolePermission, UserPermissionOverride } from "../models/index.js";
+import {
+  User,
+  RolePermission,
+  UserPermissionOverride,
+  UserClassAuthorization,
+  ClassRoom,
+  StaffMember,
+} from "../models/index.js";
 import { PERMISSION_KEYS } from "../constants/permissions.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 import {
   issueSecurityOtpChallenge,
   verifyAndConsumeSecurityOtpChallenge,
@@ -70,6 +79,10 @@ const updateUserPermissionOverridesSchema = z.object({
   overrides: z.array(permissionOverrideItemSchema),
 });
 
+const updateUserClassRoomsSchema = z.object({
+  classRoomIds: z.array(z.number().int().positive()).max(200),
+});
+
 const createUserSchema = z
   .object({
     name: z.string().trim().min(2, "Enter the user's full name").max(120),
@@ -77,6 +90,8 @@ const createUserSchema = z
     role: z.string().trim().min(2, "Enter a role").max(50),
     password: z.string().min(8, "Password must be at least 8 characters"),
     confirmPassword: z.string().min(1, "Confirm password is required"),
+    classRoomIds: z.array(z.number().int().positive()).max(200).optional().default([]),
+    staffMemberId: z.number().int().positive().nullable().optional(),
   })
   .superRefine((value, ctx) => {
     if (value.password !== value.confirmPassword) {
@@ -306,16 +321,12 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.get("/users", async (req, res) => {
+  r.get("/users", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const limit = Number.parseInt(req.query.limit as string, 10) || 100;
     const offset = Number.parseInt(req.query.offset as string, 10) || 0;
 
     try {
-      const user = await User.findByPk(userId);
-      if (!user || !isAdminRole(user.role)) {
-        return res.status(403).json({ error: "Access denied" });
-      }
 
       const { count, rows: users } = await User.findAndCountAll({
         attributes: [
@@ -337,8 +348,27 @@ export function createMeAccountRouter(config: Config) {
         offset,
       });
 
+      const userIds = users.map((u) => u.id);
+      const classIdsByUser = new Map<number, number[]>();
+      if (userIds.length > 0) {
+        const authRows = await UserClassAuthorization.findAll({
+          where: { userId: { [Op.in]: userIds } },
+          attributes: ["userId", "classRoomId"],
+        });
+        for (const ar of authRows) {
+          const uid = ar.userId;
+          const cid = ar.classRoomId;
+          const cur = classIdsByUser.get(uid) ?? [];
+          cur.push(cid);
+          classIdsByUser.set(uid, cur);
+        }
+      }
+
       return res.json({
-        users: users.map((row) => toManagedUser(row)),
+        users: users.map((row) => ({
+          ...toManagedUser(row),
+          classRoomIds: classIdsByUser.get(row.id) ?? [],
+        })),
         total: count,
       });
     } catch (err) {
@@ -347,7 +377,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.post("/users", async (req, res) => {
+  r.post("/users", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const parsed = createUserSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -355,35 +385,157 @@ export function createMeAccountRouter(config: Config) {
       return res.status(400).json({ error: msg });
     }
 
-    const { name, email, role, password } = parsed.data;
+    const { name, email, role, password, classRoomIds, staffMemberId } = parsed.data;
     const normalizedRole = normalizeRole(role);
     if (!normalizedRole) {
       return res.status(400).json({ error: "Enter a valid role" });
     }
 
     try {
-      const user = await User.findByPk(userId);
-      if (!user || !isAdminRole(user.role)) {
-        return res.status(403).json({ error: "Access denied" });
-      }
 
-      const existing = await User.findOne({ where: { email } });
+      const normalizedEmail = email.trim().toLowerCase();
+      const existing = await User.findOne({ where: { email: normalizedEmail } });
       if (existing) {
         return res.status(409).json({ error: "An account with this email already exists." });
       }
 
+      const dedupClassRoomIds = [...new Set(classRoomIds)];
+
+      const sequelize = User.sequelize;
+      if (!sequelize) {
+        return res.status(500).json({ error: "Database not initialized" });
+      }
+
       const passwordHash = await bcrypt.hash(password, 12);
-      const created = await User.create({
-        fullName: name.trim(),
-        email: email.trim(),
-        role: normalizedRole,
-        passwordHash,
-        isActive: true,
-        isDeleted: false,
+      let created: User | null = null;
+
+      await sequelize.transaction(async (t) => {
+        if (dedupClassRoomIds.length > 0) {
+          const existingClasses = await ClassRoom.findAll({
+            where: { id: { [Op.in]: dedupClassRoomIds } },
+            attributes: ["id"],
+            transaction: t,
+          });
+          if (existingClasses.length !== dedupClassRoomIds.length) {
+            throw new Error("One or more selected classes do not exist.");
+          }
+        }
+
+        created = await User.create({
+          fullName: name.trim(),
+          email: normalizedEmail,
+          role: normalizedRole,
+          passwordHash,
+          isActive: true,
+          isDeleted: false,
+        }, { transaction: t });
+
+        if (dedupClassRoomIds.length > 0 && created) {
+          await UserClassAuthorization.bulkCreate(
+            dedupClassRoomIds.map((classRoomId) => ({
+              userId: created!.id,
+              classRoomId,
+            })),
+            { transaction: t },
+          );
+        }
+        if (staffMemberId != null && created) {
+          const staff = await StaffMember.findByPk(staffMemberId, { transaction: t });
+          if (!staff) {
+            throw new Error("Selected staff member was not found.");
+          }
+          if (staff.userId != null) {
+            throw new Error("Selected staff member is already linked to another account.");
+          }
+          await staff.update({ userId: created.id }, { transaction: t });
+        }
       });
 
+      if (!created) {
+        return res.status(500).json({ error: "Failed to create user" });
+      }
+
       return res.status(201).json({
-        user: toManagedUser(created),
+        user: {
+          ...toManagedUser(created),
+          classRoomIds: dedupClassRoomIds,
+        },
+      });
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        (err.message.includes("selected classes") || err.message.includes("staff member"))
+      ) {
+        return res.status(400).json({ error: err.message });
+      }
+      console.error(err);
+      return res.status(503).json({ error: "Database unavailable" });
+    }
+  });
+
+  r.put("/users/:id/class-rooms", requirePermission("settings_users_roles"), async (req, res) => {
+    const actorId = req.userId!;
+    const targetUserId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(targetUserId)) {
+      return res.status(400).json({ error: "Invalid user id" });
+    }
+    const parsed = updateUserClassRoomsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      const msg = parsed.error.issues[0]?.message ?? "Invalid body";
+      return res.status(400).json({ error: msg });
+    }
+    const dedupIds = [...new Set(parsed.data.classRoomIds)];
+
+    try {
+      const actor = await User.findByPk(actorId);
+      if (!actor) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const target = await User.findByPk(targetUserId);
+      if (!target) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      if (target.isDeleted) {
+        return res.status(400).json({ error: "Cannot update class access for deleted user" });
+      }
+
+      const sequelize = User.sequelize;
+      if (!sequelize) {
+        return res.status(500).json({ error: "Database not initialized" });
+      }
+
+      if (dedupIds.length > 0) {
+        const existingClasses = await ClassRoom.findAll({
+          where: { id: { [Op.in]: dedupIds } },
+          attributes: ["id"],
+        });
+        if (existingClasses.length !== dedupIds.length) {
+          return res.status(400).json({ error: "One or more selected classes do not exist." });
+        }
+      }
+
+      await sequelize.transaction(async (t) => {
+        await UserClassAuthorization.destroy({
+          where: { userId: targetUserId },
+          transaction: t,
+        });
+        if (dedupIds.length > 0) {
+          await UserClassAuthorization.bulkCreate(
+            dedupIds.map((classRoomId) => ({
+              userId: targetUserId,
+              classRoomId,
+            })),
+            { transaction: t },
+          );
+        }
+      });
+
+      await target.reload();
+      return res.json({
+        user: {
+          ...toManagedUser(target),
+          classRoomIds: dedupIds,
+        },
       });
     } catch (err) {
       console.error(err);
@@ -391,7 +543,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.patch("/users/:id/profile", async (req, res) => {
+  r.patch("/users/:id/profile", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const targetUserId = Number.parseInt(req.params.id, 10);
     if (!Number.isFinite(targetUserId)) {
@@ -410,8 +562,8 @@ export function createMeAccountRouter(config: Config) {
 
     try {
       const actor = await User.findByPk(userId);
-      if (!actor || !isAdminRole(actor.role)) {
-        return res.status(403).json({ error: "Access denied" });
+      if (!actor) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
 
       const target = await User.findByPk(targetUserId);
@@ -440,7 +592,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.patch("/users/:id/role", async (req, res) => {
+  r.patch("/users/:id/role", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const targetUserId = Number.parseInt(req.params.id, 10);
     if (!Number.isFinite(targetUserId)) {
@@ -457,8 +609,8 @@ export function createMeAccountRouter(config: Config) {
     }
     try {
       const actor = await User.findByPk(userId);
-      if (!actor || !isAdminRole(actor.role)) {
-        return res.status(403).json({ error: "Access denied" });
+      if (!actor) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
       const target = await User.findByPk(targetUserId);
       if (!target) {
@@ -477,7 +629,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.patch("/users/:id/status", async (req, res) => {
+  r.patch("/users/:id/status", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const targetUserId = Number.parseInt(req.params.id, 10);
     if (!Number.isFinite(targetUserId)) {
@@ -490,8 +642,8 @@ export function createMeAccountRouter(config: Config) {
     }
     try {
       const actor = await User.findByPk(userId);
-      if (!actor || !isAdminRole(actor.role)) {
-        return res.status(403).json({ error: "Access denied" });
+      if (!actor) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
       if (actor.id === targetUserId && !parsed.data.active) {
         return res.status(400).json({ error: "You cannot deactivate your own account." });
@@ -511,7 +663,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.post("/users/:id/reset-password", async (req, res) => {
+  r.post("/users/:id/reset-password", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const targetUserId = Number.parseInt(req.params.id, 10);
     if (!Number.isFinite(targetUserId)) {
@@ -524,9 +676,10 @@ export function createMeAccountRouter(config: Config) {
     }
     try {
       const actor = await User.findByPk(userId);
-      if (!actor || !isAdminRole(actor.role)) {
-        return res.status(403).json({ error: "Access denied" });
+      if (!actor) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
+
       const target = await User.findByPk(targetUserId);
       if (!target) {
         return res.status(404).json({ error: "User not found" });
@@ -543,7 +696,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.delete("/users/:id", async (req, res) => {
+  r.delete("/users/:id", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const targetUserId = Number.parseInt(req.params.id, 10);
     if (!Number.isFinite(targetUserId)) {
@@ -551,8 +704,8 @@ export function createMeAccountRouter(config: Config) {
     }
     try {
       const actor = await User.findByPk(userId);
-      if (!actor || !isAdminRole(actor.role)) {
-        return res.status(403).json({ error: "Access denied" });
+      if (!actor) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
       if (actor.id === targetUserId) {
         return res.status(400).json({ error: "You cannot delete your own account." });
@@ -581,17 +734,13 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.get("/users/:id/permissions", async (req, res) => {
+  r.get("/users/:id/permissions", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const targetUserId = Number.parseInt(req.params.id, 10);
     if (!Number.isFinite(targetUserId)) {
       return res.status(400).json({ error: "Invalid user id" });
     }
     try {
-      const actor = await User.findByPk(userId);
-      if (!actor || !isAdminRole(actor.role)) {
-        return res.status(403).json({ error: "Access denied" });
-      }
 
       const target = await User.findByPk(targetUserId);
       if (!target) {
@@ -627,7 +776,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.put("/users/:id/permissions", async (req, res) => {
+  r.put("/users/:id/permissions", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const targetUserId = Number.parseInt(req.params.id, 10);
     if (!Number.isFinite(targetUserId)) {
@@ -639,10 +788,6 @@ export function createMeAccountRouter(config: Config) {
       return res.status(400).json({ error: msg });
     }
     try {
-      const actor = await User.findByPk(userId);
-      if (!actor || !isAdminRole(actor.role)) {
-        return res.status(403).json({ error: "Access denied" });
-      }
       const target = await User.findByPk(targetUserId);
       if (!target) {
         return res.status(404).json({ error: "User not found" });
@@ -677,7 +822,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.get("/role-permissions", async (req, res) => {
+  r.get("/role-permissions", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     try {
       const user = await User.findByPk(userId);
@@ -696,7 +841,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.post("/role-permissions", async (req, res) => {
+  r.post("/role-permissions", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const parsed = updateRolePermissionsSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -706,10 +851,6 @@ export function createMeAccountRouter(config: Config) {
     const { role, permissions } = parsed.data;
 
     try {
-      const user = await User.findByPk(userId);
-      if (!user || !isAdminRole(user.role)) {
-        return res.status(403).json({ error: "Access denied" });
-      }
 
       // Bulk update: delete all for this role and re-insert, atomically so
       // a failure mid-way never leaves the role with zero permissions.
@@ -735,7 +876,7 @@ export function createMeAccountRouter(config: Config) {
     }
   });
 
-  r.post("/role-permissions/bulk", async (req, res) => {
+  r.post("/role-permissions/bulk", requirePermission("settings_users_roles"), async (req, res) => {
     const userId = req.userId!;
     const parsed = bulkUpdateRolePermissionsSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -743,10 +884,6 @@ export function createMeAccountRouter(config: Config) {
     }
 
     try {
-      const user = await User.findByPk(userId);
-      if (!user || !isAdminRole(user.role)) {
-        return res.status(403).json({ error: "Access denied" });
-      }
 
       const sequelize = RolePermission.sequelize;
       if (!sequelize) {

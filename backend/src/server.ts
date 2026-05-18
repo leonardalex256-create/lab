@@ -2,6 +2,8 @@ import { loadConfig } from "./config.js";
 import { appendDebugNdjson } from "./debugSessionLog.js";
 import { ensureSecuritySchema } from "./db/ensureSecuritySchema.js";
 import { ensureDashboardSchema } from "./db/ensureDashboardSchema.js";
+import { ensureAddendumSchema } from "./db/ensureAddendumSchema.js";
+import { ensureFinanceHistoricalSchema } from "./db/ensureFinanceHistoricalSchema.js";
 import { setupDatabase } from "./models/index.js";
 import { buildApp } from "./app.js";
 
@@ -12,6 +14,8 @@ try {
   await sequelize.authenticate();
   await ensureSecuritySchema(sequelize);
   await ensureDashboardSchema(sequelize);
+  await ensureFinanceHistoricalSchema(sequelize);
+  await ensureAddendumSchema(sequelize);
 } catch (err) {
   appendDebugNdjson({
     sessionId: "d76cee",

@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { createFinancePayment } from "../../../api/financePayments";
 import { fetchStudentStatement } from "../../../api/financeStatements";
+import { fetchDebtorsReport } from "../../../api/financeDebtors";
 import { fetchFinanceDashboard } from "../../../api/financeDashboard";
 import { fetchStudents, type StudentApiRow } from "../../../api/students";
 import { StudentStatementPage } from "../statements/StudentStatementPage";
 import { StudentReceiptPage } from "./StudentReceiptPage";
 import type { StudentPaymentReceipt, StudentStatementPayload } from "../shared/financeTypes";
+import { useTermContext } from "../../../context/TermContext";
+import { numberToWords, toSentenceCase } from "../shared/numberToWords";
 
 function studentLabel(student: StudentApiRow): string {
   return `${student.fullName} (${student.admissionNumber})`;
@@ -19,19 +22,17 @@ type ReportStatus = {
   isLocked: boolean;
 };
 
-export function RecordStudentPaymentPage() {
+export function RecordStudentPaymentPage({ generatedByName }: { generatedByName?: string }) {
+  const { viewingTerm: term, viewingAcademicYear, historicalReadOnly } = useTermContext();
   const [mode, setMode] = useState<ViewMode>("form");
   const [studentSearch, setStudentSearch] = useState("");
   const [studentMatches, setStudentMatches] = useState<StudentApiRow[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<StudentApiRow | null>(null);
-  const [term, setTerm] = useState("Term 1");
   const [method, setMethod] = useState("Cash");
   const [paidBy, setPaidBy] = useState("");
   const [amount, setAmount] = useState("");
-  const [termDue, setTermDue] = useState("");
-  const [termDueTouched, setTermDueTouched] = useState(false);
-  const [autoAssignedDue, setAutoAssignedDue] = useState<number | null>(null);
+  const [outstandingDue, setOutstandingDue] = useState<number | null>(null);
   const [changeReason, setChangeReason] = useState("");
   const [receipt, setReceipt] = useState<StudentPaymentReceipt | null>(null);
   const [statement, setStatement] = useState<StudentStatementPayload | null>(null);
@@ -78,7 +79,7 @@ export function RecordStudentPaymentPage() {
         data: { qLen: studentSearch.trim().length },
         timestamp: Date.now(),
       }),
-    }).catch(() => {});
+    }).catch(() => { });
     // #endregion
     void fetchStudents({ q: studentSearch.trim(), sortBy: "name", sortDir: "asc", limit: 8 })
       .then((result) => {
@@ -102,7 +103,7 @@ export function RecordStudentPaymentPage() {
             },
             timestamp: Date.now(),
           }),
-        }).catch(() => {});
+        }).catch(() => { });
         // #endregion
       })
       .catch(() => {
@@ -123,7 +124,7 @@ export function RecordStudentPaymentPage() {
             data: {},
             timestamp: Date.now(),
           }),
-        }).catch(() => {});
+        }).catch(() => { });
         // #endregion
       })
       .finally(() => {
@@ -135,30 +136,28 @@ export function RecordStudentPaymentPage() {
   }, [studentSearch]);
 
   const parsedAmount = Math.max(Number(amount) || 0, 0);
-  const parsedDue = Math.max(Number(termDue) || 0, 0);
+  const amountWords = `${toSentenceCase(numberToWords(parsedAmount))} Uganda shillings only`;
+  const calculatedBalance = outstandingDue != null ? outstandingDue - parsedAmount : null;
 
   useEffect(() => {
     if (!selectedStudent) {
-      setAutoAssignedDue(null);
-      if (!termDueTouched) setTermDue("");
+      setOutstandingDue(null);
       return;
     }
     let cancelled = false;
-    void fetchStudentStatement(selectedStudent.id, term)
-      .then((data) => {
+    void fetchDebtorsReport(term, viewingAcademicYear)
+      .then((report) => {
         if (cancelled) return;
-        setAutoAssignedDue(data.assignedAmount);
-        if (!termDueTouched) {
-          setTermDue(data.assignedAmount > 0 ? String(data.assignedAmount) : "");
-        }
+        const row = report.items.find((x) => x.id === selectedStudent.id);
+        setOutstandingDue(row ? Number(row.balance) : 0);
       })
       .catch(() => {
-        if (!cancelled) setAutoAssignedDue(null);
+        if (!cancelled) setOutstandingDue(null);
       });
     return () => {
       cancelled = true;
     };
-  }, [selectedStudent, term, termDueTouched]);
+  }, [selectedStudent, term, viewingAcademicYear]);
 
   const createReceipt = async (printAfterCreate = false) => {
     setFormError(null);
@@ -167,6 +166,12 @@ export function RecordStudentPaymentPage() {
       return;
     }
     // Even if UI input is allowed for searching, recording payments must be blocked when the daily report is locked.
+    if (historicalReadOnly) {
+      setFormError(
+        "You can view past terms, but only administrators can record payments outside the current school term.",
+      );
+      return;
+    }
     if (reportStatus?.isLocked && !reportStatus?.isReopened) {
       setFormError("Data entry is locked for today. Ask an admin to reopen the report before saving payments.");
       return;
@@ -181,16 +186,30 @@ export function RecordStudentPaymentPage() {
     }
     setSubmitting(true);
     try {
+      const calculatedOutstandingAfterSave =
+        outstandingDue != null ? Math.max(outstandingDue - parsedAmount, 0) : null;
       const saved = await createFinancePayment({
         studentId: selectedStudent.id,
         term,
         paymentMethod: method,
         paidBy: paidBy.trim() || selectedStudent.parentFullName || "Parent / Guardian",
         amountPaid: parsedAmount,
-        amountDueUgx: parsedDue > 0 ? parsedDue : undefined,
+        // Do not overwrite assigned term fee while recording payments.
+        // Payment flow should subtract from existing outstanding balance only.
+        amountDueUgx: undefined,
         changeReason: reportStatus?.isReopened ? changeReason.trim() : null,
       });
-      setReceipt(saved);
+      setReceipt({
+        ...saved,
+        outstandingAfter:
+          calculatedOutstandingAfterSave != null
+            ? calculatedOutstandingAfterSave
+            : saved.outstandingAfter,
+        generatedByName:
+          (saved.generatedByName ??
+          generatedByName?.trim()) ||
+          "Account User",
+      });
       setMode("receipt");
       if (printAfterCreate) window.setTimeout(() => window.print(), 150);
     } catch (e) {
@@ -203,7 +222,7 @@ export function RecordStudentPaymentPage() {
   const openStatement = async () => {
     if (!selectedStudent) return;
     try {
-      const data = await fetchStudentStatement(selectedStudent.id, term);
+      const data = await fetchStudentStatement(selectedStudent.id, term, viewingAcademicYear);
       setStatement(data);
       setMode("statement");
     } catch (e) {
@@ -265,7 +284,15 @@ export function RecordStudentPaymentPage() {
             📄 View Term Statement
           </button>
         </div>
-        <StudentReceiptPage receipt={receipt} />
+        <StudentReceiptPage
+          receipt={{
+            ...receipt,
+            generatedByName:
+              (receipt.generatedByName ??
+              generatedByName?.trim()) ||
+              "Account User",
+          }}
+        />
       </div>
     );
   }
@@ -316,6 +343,13 @@ export function RecordStudentPaymentPage() {
   /* ── Locked state ── */
   const isLocked = reportStatus?.isLocked === true;
   const isReopened = reportStatus?.isReopened === true;
+  const saveDisabled =
+    submitting ||
+    historicalReadOnly ||
+    isLocked ||
+    !selectedStudent ||
+    parsedAmount <= 0 ||
+    (isReopened && !changeReason.trim());
 
   /* ── Payment Form ── */
   return (
@@ -618,7 +652,6 @@ export function RecordStudentPaymentPage() {
                     type="button"
                     onClick={() => {
                       setSelectedStudent(s);
-                      setTermDueTouched(false);
                       setStudentSearch(studentLabel(s));
                       setStudentMatches([]);
                       setPaidBy(s.parentFullName ?? "");
@@ -684,12 +717,7 @@ export function RecordStudentPaymentPage() {
               >
                 📅
               </span>
-              <select
-                value={term}
-                onChange={(e) => {
-                  setTerm(e.target.value);
-                  setTermDueTouched(false);
-                }}
+              <div
                 style={{
                   height: 56,
                   borderRadius: 12,
@@ -698,31 +726,18 @@ export function RecordStudentPaymentPage() {
                   fontSize: "1rem",
                   width: "100%",
                   boxSizing: "border-box",
-                  background: "#fff",
-                  cursor: "pointer",
-                  appearance: "none",
-                  outline: "none",
-                  transition: "border-color 0.2s",
-                }}
-                onFocus={(e) => (e.target.style.borderColor = "#0c2340")}
-                onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")}
-              >
-                <option value="Term 1">Term 1</option>
-                <option value="Term 2">Term 2</option>
-                <option value="Term 3">Term 3</option>
-              </select>
-              <span
-                style={{
-                  position: "absolute",
-                  right: 16,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  pointerEvents: "none",
-                  color: "#94a3b8",
+                  background: "#f8fafc",
+                  display: "flex",
+                  alignItems: "center",
+                  fontWeight: 700,
+                  color: "#0f172a",
                 }}
               >
-                ▾
-              </span>
+                {term}
+                <span style={{ marginLeft: 10, fontSize: "0.75rem", fontWeight: 600, color: "#64748b" }}>
+                  (header picker)
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -914,7 +929,7 @@ export function RecordStudentPaymentPage() {
             </div>
           </div>
 
-          {/* Term Fees Due (optional) */}
+          {/* Auto-calculated Student Balance */}
           <div>
             <label
               style={{
@@ -926,60 +941,50 @@ export function RecordStudentPaymentPage() {
                 letterSpacing: "0.03em",
               }}
             >
-              TERM FEES DUE (UGX)
-              <span style={{ fontWeight: 400, color: "#94a3b8", marginLeft: 6 }}>optional</span>
+              STUDENT BALANCE (AUTO-CALCULATED)
             </label>
-            <div style={{ position: "relative" }}>
-              <span
-                style={{
-                  position: "absolute",
-                  left: 16,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  fontWeight: 800,
-                  color: "#94a3b8",
-                  fontSize: "0.85rem",
-                }}
-              >
-                UGX
+            <div
+              style={{
+                minHeight: 56,
+                borderRadius: 12,
+                border: "2px solid #e2e8f0",
+                padding: "12px 16px",
+                background: "#f8fafc",
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "center",
+                gap: 4,
+              }}
+            >
+              <span style={{ fontSize: "1.05rem", color: "#0f172a", fontWeight: 900, letterSpacing: "-0.01em" }}>
+                {calculatedBalance != null
+                  ? `${calculatedBalance.toLocaleString("en-UG")} UGX`
+                  : "Select student to auto-calculate"}
               </span>
-              <input
-                type="number"
-                min="0"
-                value={termDue}
-                onChange={(e) => {
-                  setTermDue(e.target.value);
-                  setTermDueTouched(true);
-                }}
-                placeholder="Auto-calculated"
-                style={{
-                  height: 56,
-                  borderRadius: 12,
-                  border: "2px solid #e2e8f0",
-                  padding: "0 16px 0 56px",
-                  fontSize: "1rem",
-                  width: "100%",
-                  boxSizing: "border-box",
-                  outline: "none",
-                  transition: "border-color 0.2s, box-shadow 0.2s",
-                  color: "#64748b",
-                }}
-                onFocus={(e) => {
-                  e.target.style.borderColor = "#0c2340";
-                  e.target.style.boxShadow = "0 0 0 4px rgba(12,35,64,0.08)";
-                }}
-                onBlur={(e) => {
-                  e.target.style.borderColor = "#e2e8f0";
-                  e.target.style.boxShadow = "none";
-                }}
-              />
             </div>
             <span style={{ fontSize: "0.75rem", color: "#94a3b8", marginTop: 4, display: "block" }}>
-              {autoAssignedDue != null
-                ? `Current assigned term fee: ${autoAssignedDue.toLocaleString("en-UG")} UGX.`
-                : "Override the fee structure amount for this term (leave blank to auto-detect)."}
+              {outstandingDue != null
+                ? `Calculated from ${outstandingDue.toLocaleString("en-UG")} UGX outstanding balance (from Debtors Report) minus ${parsedAmount.toLocaleString("en-UG")} UGX amount paid.`
+                : "Balance is automatically fetched after selecting a student."}
             </span>
           </div>
+        </div>
+
+        <div
+          style={{
+            borderRadius: 12,
+            border: "1px solid rgba(16,185,129,0.28)",
+            background: "rgba(16,185,129,0.08)",
+            padding: "12px 14px",
+            marginBottom: 24,
+          }}
+        >
+          <p style={{ margin: 0, fontSize: "0.72rem", letterSpacing: "0.1em", fontWeight: 800, color: "#047857" }}>
+            AMOUNT IN WORDS (AUTOGENERATED)
+          </p>
+          <p style={{ margin: "6px 0 0", fontSize: "0.92rem", fontWeight: 800, color: "#065f46" }}>
+            {amountWords}
+          </p>
         </div>
 
         {/* Reason for Change (visible only when reopened) */}
@@ -1062,49 +1067,11 @@ export function RecordStudentPaymentPage() {
         )}
 
         {/* Action Buttons */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-          <button
-            type="button"
-            onClick={() => void createReceipt(false)}
-            disabled={
-              submitting ||
-              isLocked ||
-              !selectedStudent ||
-              parsedAmount <= 0 ||
-              (isReopened && !changeReason.trim())
-            }
-            style={{
-              height: 56,
-              background: "#fff",
-              color: "#0c2340",
-              border: "2px solid #0c2340",
-              borderRadius: 14,
-              fontSize: "1rem",
-              fontWeight: 800,
-              cursor: submitting || isLocked || !selectedStudent || parsedAmount <= 0 || (isReopened && !changeReason.trim()) ? "not-allowed" : "pointer",
-              transition: "all 0.2s",
-              boxShadow: "0 4px 6px -1px rgba(0,0,0,0.05)",
-              opacity: submitting || isLocked || !selectedStudent || parsedAmount <= 0 || (isReopened && !changeReason.trim()) ? 0.6 : 1,
-            }}
-            onMouseOver={(e) => {
-              if (selectedStudent && parsedAmount > 0 && (!isReopened || changeReason.trim())) e.currentTarget.style.background = "rgba(12,35,64,0.04)";
-            }}
-            onMouseOut={(e) => {
-              e.currentTarget.style.background = "#fff";
-            }}
-          >
-            {submitting ? "Saving..." : "Save Payment"}
-          </button>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 20 }}>
           <button
             type="button"
             onClick={() => void createReceipt(true)}
-            disabled={
-              submitting ||
-              isLocked ||
-              !selectedStudent ||
-              parsedAmount <= 0 ||
-              (isReopened && !changeReason.trim())
-            }
+            disabled={saveDisabled}
             style={{
               height: 56,
               borderRadius: 14,
@@ -1113,8 +1080,8 @@ export function RecordStudentPaymentPage() {
               background: "linear-gradient(135deg, #0c2340, #1a3a5c)",
               color: "#fff",
               fontSize: "1rem",
-              cursor: submitting || isLocked || !selectedStudent || parsedAmount <= 0 || (isReopened && !changeReason.trim()) ? "not-allowed" : "pointer",
-              opacity: submitting || isLocked || !selectedStudent || parsedAmount <= 0 || (isReopened && !changeReason.trim()) ? 0.6 : 1,
+              cursor: saveDisabled ? "not-allowed" : "pointer",
+              opacity: saveDisabled ? 0.6 : 1,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -1123,7 +1090,7 @@ export function RecordStudentPaymentPage() {
               transition: "all 0.2s",
             }}
             onMouseOver={(e) => {
-              if (selectedStudent && parsedAmount > 0 && (!isReopened || changeReason.trim())) e.currentTarget.style.transform = "translateY(-1px)";
+              if (!saveDisabled) e.currentTarget.style.transform = "translateY(-1px)";
             }}
             onMouseOut={(e) => {
               e.currentTarget.style.transform = "translateY(0)";

@@ -5,6 +5,7 @@ import {
   StudentFeeStructure,
   ClassRoom,
 } from "../models/index.js";
+import { loadOfficialSchoolTermYear } from "../lib/officialSchoolTermYear.js";
 
 function studentClassName(student: Student): string | null {
   const assoc = student.get("classRoom") as { name?: string } | null | undefined;
@@ -58,6 +59,14 @@ export function createMeFinanceBurseryRouter() {
       if (!term || typeof term !== "string") {
         return res.status(400).json({ error: "Term is required to apply the discount" });
       }
+      const official = await loadOfficialSchoolTermYear();
+      const termTrim = term.trim();
+      if (termTrim !== official.term) {
+        return res.status(400).json({
+          error: `Bursary fee updates apply only to the school's current term (${official.term}).`,
+        });
+      }
+      const academicYear = official.academicYear;
       if (!parsedStartsAt || !parsedEndsAt) {
         return res.status(400).json({ error: "Bursary start and end dates are required" });
       }
@@ -98,7 +107,7 @@ export function createMeFinanceBurseryRouter() {
 
         const structure = feeStatus
           ? await StudentFeeStructure.findOne({
-              where: { term, boardingStatus: feeStatus },
+              where: { term: termTrim, boardingStatus: feeStatus },
               transaction: t,
             })
           : null;
@@ -110,25 +119,22 @@ export function createMeFinanceBurseryRouter() {
             baseAmount * (1 - parsedPercentage / 100),
           );
 
-          const [assignment] = await StudentFeeAssignment.findOrCreate({
-            where: { studentId: parsedStudentId, term },
+          const finalNotes =
+            parsedPercentage > 0 ? `Bursery applied: ${parsedPercentage}%` : null;
+          const [assignment, created] = await StudentFeeAssignment.findOrCreate({
+            where: { studentId: parsedStudentId, term: termTrim, academicYear },
             defaults: {
               amountDueUgx: discountedAmount,
-              notes: `Bursery applied: ${parsedPercentage}%`,
+              notes: finalNotes ?? `Bursery applied: ${parsedPercentage}%`,
             },
             transaction: t,
           });
-
-          await assignment.update(
-            {
-              amountDueUgx: discountedAmount,
-              notes:
-                parsedPercentage > 0
-                  ? `Bursery applied: ${parsedPercentage}%`
-                  : null,
-            },
-            { transaction: t },
-          );
+          if (!created) {
+            await assignment.update(
+              { amountDueUgx: discountedAmount, notes: finalNotes },
+              { transaction: t },
+            );
+          }
         }
       });
 
@@ -138,7 +144,8 @@ export function createMeFinanceBurseryRouter() {
         bursaryPercentage: parsedPercentage,
         bursaryStartsAt: parsedStartsAt,
         bursaryEndsAt: parsedEndsAt,
-        appliedToTerm: term,
+        appliedToTerm: termTrim,
+        academicYear,
       });
     } catch (err) {
       console.error(err);
@@ -146,18 +153,31 @@ export function createMeFinanceBurseryRouter() {
     }
   });
 
-  /** Revoke bursary (reset to 0). */
+  /**
+   * Revoke bursary (reset to 0).
+   * BREAKING CHANGE: `term` is now read from the query string (`?term=Term%201`).
+   * Some HTTP clients and proxies strip request bodies on DELETE, so passing
+   * `term` via `req.body` was unreliable. Frontend callers must use a query param.
+   */
   r.delete("/finance/bursery/:studentId", async (req, res) => {
     try {
       const studentId = Number(req.params.studentId);
-      const { term } = req.body; // Needs term to restore the base fee
+      const term = typeof req.query.term === "string" ? req.query.term : undefined;
 
       if (!Number.isFinite(studentId) || studentId < 1) {
         return res.status(400).json({ error: "Invalid studentId" });
       }
       if (!term || typeof term !== "string") {
-        return res.status(400).json({ error: "Term is required to restore default fees" });
+        return res.status(400).json({ error: "Term is required (pass ?term=Term%201) to restore default fees" });
       }
+      const official = await loadOfficialSchoolTermYear();
+      const termTrim = term.trim();
+      if (termTrim !== official.term) {
+        return res.status(400).json({
+          error: `Use the school's current term (${official.term}) to restore fees after revoking bursary.`,
+        });
+      }
+      const academicYear = official.academicYear;
 
       const student = await Student.findByPk(studentId, {
         include: [{ model: ClassRoom, as: "classRoom", required: false }],
@@ -180,7 +200,7 @@ export function createMeFinanceBurseryRouter() {
 
         const structure = feeStatus
           ? await StudentFeeStructure.findOne({
-              where: { term, boardingStatus: feeStatus },
+              where: { term: termTrim, boardingStatus: feeStatus },
               transaction: t,
             })
           : null;
@@ -189,7 +209,7 @@ export function createMeFinanceBurseryRouter() {
 
         if (baseAmount > 0) {
           const assignment = await StudentFeeAssignment.findOne({
-            where: { studentId, term },
+            where: { studentId, term: termTrim, academicYear },
             transaction: t,
           });
           if (assignment) {
@@ -210,7 +230,8 @@ export function createMeFinanceBurseryRouter() {
         bursaryPercentage: 0,
         bursaryStartsAt: null,
         bursaryEndsAt: null,
-        restoredTerm: term,
+        restoredTerm: termTrim,
+        academicYear,
       });
     } catch (err) {
       console.error(err);

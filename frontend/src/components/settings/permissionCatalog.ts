@@ -27,6 +27,18 @@ export const PERMISSION_SECTORS: PermissionSectorDef[] = [
       "students_admissions",
       "students_import",
       "students_parents",
+      "students_view",
+      "students_edit",
+      "students_delete",
+      "students_transfer",
+      "students_promote",
+      "students_export",
+      "students_print",
+      "students_attendance",
+      "students_medical",
+      "students_financial",
+      "students_report_card",
+      "students_documents",
     ],
   },
   {
@@ -141,6 +153,54 @@ export const PERMISSION_DETAILS: Record<
   students_parents: {
     title: "Students - parents",
     description: "Access parent-linked student records.",
+  },
+  students_view: {
+    title: "View student profiles",
+    description: "Read-only access to individual student profile records.",
+  },
+  students_edit: {
+    title: "Edit student details",
+    description: "Modify existing student profiles, personal data, photos, and boarding status.",
+  },
+  students_delete: {
+    title: "Delete / archive students",
+    description: "Permanently remove or soft-delete a student record from the system.",
+  },
+  students_transfer: {
+    title: "Transfer students",
+    description: "Move a student between classes or sections within the school.",
+  },
+  students_promote: {
+    title: "Promote students",
+    description: "Bulk promote students to the next class at term or year end.",
+  },
+  students_export: {
+    title: "Export student data",
+    description: "Download student lists as CSV/Excel/PDF files.",
+  },
+  students_print: {
+    title: "Print student records",
+    description: "Print ID cards, individual profiles, or class lists.",
+  },
+  students_attendance: {
+    title: "Student attendance",
+    description: "Mark and view daily attendance records for students.",
+  },
+  students_medical: {
+    title: "Medical information",
+    description: "Access sensitive medical and health records for students.",
+  },
+  students_financial: {
+    title: "Student fee status",
+    description: "View fee balances and payment history on the student profile.",
+  },
+  students_report_card: {
+    title: "Report cards",
+    description: "View and print academic report cards from the student profile.",
+  },
+  students_documents: {
+    title: "Student documents",
+    description: "Upload and manage birth certificates, transfer letters, and other documents.",
   },
   nav_classes: {
     title: "Classes & sections module",

@@ -8,12 +8,21 @@ import { ensureSecuritySchema } from "../db/ensureSecuritySchema.js";
 import { loadUserMeFields } from "../db/loadUserSafe.js";
 import { User, UserNotification, userByEmailCi } from "../models/index.js";
 import {
+  isStrongPassword,
+  STRONG_PASSWORD_MESSAGE,
+} from "../lib/passwordPolicy.js";
+import {
   issueSecurityOtpChallenge,
   verifyAndConsumeSecurityOtpChallenge,
 } from "../services/securityOtpChallenge.js";
 
 const loginSchema = z.object({
-  email: z.string().min(1),
+  email: z
+    .string()
+    .trim()
+    .min(1)
+    .email("Enter a valid email")
+    .refine((v) => v === v.toLowerCase(), { message: "Email must be lowercase." }),
   password: z.string().min(1),
   /** When true, issue a longer-lived JWT (same as “Remember me” on the client). */
   rememberMe: z.boolean().optional(),
@@ -24,12 +33,17 @@ const verify2faSchema = z.object({
   otp: z.string().min(4),
 });
 
-const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
-
 const registerSchema = z
   .object({
     name: z.string().trim().min(2, "Enter your full name").max(120),
-    email: z.string().trim().email("Enter a valid email").max(255),
+    email: z
+      .string()
+      .trim()
+      .email("Enter a valid email")
+      .max(255)
+      .refine((v) => v === v.toLowerCase(), {
+        message: "Email must be lowercase.",
+      }),
     phoneNumber: z.string().trim().regex(/^(?:\+256|0|256)[1-9]\d{8}$/, "Must be a valid Ugandan phone number (e.g. 0772123456 or +256772123456)"),
     gender: z.string().trim().min(1, "Select gender").max(32),
     dateOfBirth: z.string().trim().min(4, "Select date of birth"),
@@ -38,12 +52,11 @@ const registerSchema = z
     confirmPassword: z.string().min(1, "Confirm password "),
   })
   .superRefine((value, ctx) => {
-    if (!STRONG_PASSWORD_REGEX.test(value.password)) {
+    if (!isStrongPassword(value.password)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["password"],
-        message:
-          "Password must include uppercase, lowercase, number, and symbol characters",
+        message: STRONG_PASSWORD_MESSAGE,
       });
     }
     if (value.password !== value.confirmPassword) {
@@ -63,52 +76,8 @@ export function createAuthRouter(config: Config) {
   const r = Router();
 
   r.post("/login", async (req, res) => {
-    // #region agent log
-    fetch("http://127.0.0.1:7413/ingest/299b84ae-e9b2-45ce-b53d-28789819d44d", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "97f58a",
-      },
-      body: JSON.stringify({
-        sessionId: "97f58a",
-        runId: "initial",
-        hypothesisId: "H6",
-        location: "backend/src/routes/auth.ts:/login:start",
-        message: "backend_login_request_received",
-        data: {
-          hasBody: Boolean(req.body),
-          bodyKeys:
-            req.body && typeof req.body === "object"
-              ? Object.keys(req.body as Record<string, unknown>)
-              : [],
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
-      // #region agent log
-      fetch("http://127.0.0.1:7413/ingest/299b84ae-e9b2-45ce-b53d-28789819d44d", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "97f58a",
-        },
-        body: JSON.stringify({
-          sessionId: "97f58a",
-          runId: "initial",
-          hypothesisId: "H6",
-          location: "backend/src/routes/auth.ts:/login:validation",
-          message: "backend_login_validation_failed",
-          data: {
-            issueCount: parsed.error.issues.length,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       return res.status(400).json({
         error: "Enter your email and password.",
       });
@@ -127,55 +96,11 @@ export function createAuthRouter(config: Config) {
         user = found;
       }
     } catch (err) {
-      // #region agent log
-      fetch("http://127.0.0.1:7413/ingest/299b84ae-e9b2-45ce-b53d-28789819d44d", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "97f58a",
-        },
-        body: JSON.stringify({
-          sessionId: "97f58a",
-          runId: "initial",
-          hypothesisId: "H7",
-          location: "backend/src/routes/auth.ts:/login:userLookup",
-          message: "backend_login_user_lookup_failed",
-          data: {
-            errorName: err instanceof Error ? err.name : "unknown",
-            errorMessage: err instanceof Error ? err.message : "non_error_thrown",
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       console.error(err);
       return res.status(503).json({ error: "Database unavailable" });
     }
 
     const ok = await bcrypt.compare(password, hashToCompare);
-    // #region agent log
-    fetch("http://127.0.0.1:7413/ingest/299b84ae-e9b2-45ce-b53d-28789819d44d", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "97f58a",
-      },
-      body: JSON.stringify({
-        sessionId: "97f58a",
-        runId: "initial",
-        hypothesisId: "H8",
-        location: "backend/src/routes/auth.ts:/login:compare",
-        message: "backend_login_compare_finished",
-        data: {
-          passwordMatched: ok,
-          userFound: Boolean(user),
-          twoFactorEnabled: Boolean(user?.twoFactorEnabled),
-          rememberMe: Boolean(rememberMe),
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     if (!ok || !user) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
@@ -386,6 +311,7 @@ export function createAuthRouter(config: Config) {
       return res.json({
         user: {
           sub: payload.sub,
+          name: fields.name,
           email: fields.email,
           role: fields.role,
           twoFactorEnabled: fields.twoFactorEnabled,

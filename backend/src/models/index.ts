@@ -115,6 +115,7 @@ export class StudentAssessmentResult extends Model {
   declare studentId: number;
   declare classRoomId: number;
   declare sectionName: string | null;
+  declare academicYear: string;
   declare term: string;
   declare examType: string;
   declare subject: string;
@@ -139,6 +140,7 @@ export class AcademicSubjectAssignment extends Model {
   declare classCategoryId: number;
   declare sectionName: string | null;
   declare subjectName: string;
+  declare shortForm: string;
   declare readonly createdAt: Date;
 }
 
@@ -155,6 +157,7 @@ export class StudentFeeReceipt extends Model {
   declare id: number;
   declare studentId: number;
   declare receiptNo: string;
+  declare academicYear: string;
   declare term: string;
   declare paymentMethod: string;
   declare paidBy: string;
@@ -169,6 +172,7 @@ export class StudentFeeReceipt extends Model {
 export class StudentFeeAssignment extends Model {
   declare id: number;
   declare studentId: number;
+  declare academicYear: string;
   declare term: string;
   declare amountDueUgx: number;
   declare notes: string | null;
@@ -187,12 +191,17 @@ export class StudentFeeStructure extends Model {
 export class StudentFeePayment extends Model {
   declare id: number;
   declare studentId: number;
+  declare academicYear: string;
   declare term: string;
   declare amountPaidUgx: number;
   declare paymentMethod: string;
   declare paidBy: string;
   declare receiptId: number | null;
   declare readonly createdAt: Date;
+  declare changeReason: string | null;
+  declare allocatesPriorTerms: boolean;
+  declare note: string | null;
+  declare paymentDate: string | null;
 }
 
 export class DailyExpenseEntry extends Model {
@@ -831,6 +840,11 @@ export function setupDatabase(config: Config): Sequelize {
         defaultValue: "",
         field: "section_name",
       },
+      academicYear: {
+        type: DataTypes.STRING(4),
+        allowNull: false,
+        field: "academic_year",
+      },
       term: {
         type: DataTypes.STRING(20),
         allowNull: false,
@@ -879,9 +893,13 @@ export function setupDatabase(config: Config): Sequelize {
       updatedAt: "updated_at",
       indexes: [
         {
-          name: "uq_student_assessment_results_student_term_exam_subject",
+          name: "uq_student_assessment_results_student_year_term_exam_subject",
           unique: true,
-          fields: ["student_id", "term", "exam_type", "subject"],
+          fields: ["student_id", "academic_year", "term", "exam_type", "subject"],
+        },
+        {
+          name: "student_assessment_results_year_term_class_idx",
+          fields: ["academic_year", "term", "class_room_id"],
         },
       ],
     },
@@ -954,6 +972,12 @@ export function setupDatabase(config: Config): Sequelize {
         allowNull: false,
         field: "subject_name",
       },
+      shortForm: {
+        type: DataTypes.STRING(8),
+        allowNull: false,
+        field: "short_form",
+        defaultValue: "",
+      },
       createdAt: {
         type: DataTypes.DATE,
         allowNull: false,
@@ -992,6 +1016,11 @@ export function setupDatabase(config: Config): Sequelize {
         type: DataTypes.STRING(32),
         allowNull: false,
         field: "receipt_no",
+      },
+      academicYear: {
+        type: DataTypes.STRING(4),
+        allowNull: false,
+        field: "academic_year",
       },
       term: {
         type: DataTypes.STRING(20),
@@ -1063,6 +1092,11 @@ export function setupDatabase(config: Config): Sequelize {
         allowNull: false,
         field: "student_id",
       },
+      academicYear: {
+        type: DataTypes.STRING(4),
+        allowNull: false,
+        field: "academic_year",
+      },
       term: {
         type: DataTypes.STRING(20),
         allowNull: false,
@@ -1085,6 +1119,13 @@ export function setupDatabase(config: Config): Sequelize {
       tableName: "student_fee_assignments",
       modelName: "StudentFeeAssignment",
       timestamps: false,
+      indexes: [
+        {
+          name: "uq_student_fee_assignments_student_year_term",
+          unique: true,
+          fields: ["student_id", "academic_year", "term"],
+        },
+      ],
     },
   );
 
@@ -1148,6 +1189,11 @@ export function setupDatabase(config: Config): Sequelize {
         allowNull: false,
         field: "student_id",
       },
+      academicYear: {
+        type: DataTypes.STRING(4),
+        allowNull: false,
+        field: "academic_year",
+      },
       term: {
         type: DataTypes.STRING(20),
         allowNull: false,
@@ -1183,6 +1229,22 @@ export function setupDatabase(config: Config): Sequelize {
         allowNull: true,
         field: "change_reason",
       },
+      allocatesPriorTerms: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+        field: "allocates_prior_terms",
+      },
+      note: {
+        type: DataTypes.STRING(200),
+        allowNull: true,
+        field: "note",
+      },
+      paymentDate: {
+        type: DataTypes.DATEONLY,
+        allowNull: true,
+        field: "payment_date",
+      },
     },
     {
       sequelize,
@@ -1191,6 +1253,7 @@ export function setupDatabase(config: Config): Sequelize {
       timestamps: false,
       indexes: [
         { fields: ["created_at"] },
+        { fields: ["student_id", "academic_year", "term"] },
       ],
     },
   );

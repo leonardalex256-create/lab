@@ -1,11 +1,18 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchStudent, fetchStudents, type StudentApiRow } from "../../api/students";
-import { assignBursary, revokeBursary } from "../../api/financeBursary";
+import { assignBursary, fetchActiveBursaries, revokeBursary, type BursaryRow } from "../../api/financeBursary";
 import { fetchStudentStatement } from "../../api/financeStatements";
 import { formatCurrencyUGX } from "./shared/financeFormat";
 import { useI18n } from "../../i18n/I18nProvider";
+import { useTermContext } from "../../context/TermContext";
+import { ConfirmModal } from "./shared/ConfirmModal";
 
-function studentLabel(student: StudentApiRow): string {
+type ExpiryState =
+  | { kind: "expiring_soon"; endsAt: string; daysLeft: number }
+  | { kind: "expired"; endsAt: string }
+  | null;
+
+function studentLabel(student: Pick<StudentApiRow, "fullName" | "admissionNumber">): string {
   return `${student.fullName} (${student.admissionNumber})`;
 }
 
@@ -15,6 +22,34 @@ function toDateTimeLocalValue(iso: string | null | undefined): string {
   if (Number.isNaN(d.getTime())) return "";
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+}
+
+function normalizeStatusLabel(status: string | null | undefined): string {
+  const s = (status ?? "").trim();
+  if (!s) return "—";
+  return s
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function isBursaryActive(startsAt: string | null, endsAt: string | null): boolean {
+  if (!startsAt || !endsAt) return false;
+  const now = Date.now();
+  return now >= new Date(startsAt).getTime() && now < new Date(endsAt).getTime();
+}
+
+function daysRemaining(endsAt: string): number {
+  const diffMs = new Date(endsAt).getTime() - Date.now();
+  return Math.ceil(diffMs / (1000 * 60 * 60 * 24));
 }
 
 export function AssignBursaryPage({
@@ -27,26 +62,88 @@ export function AssignBursaryPage({
   initialPercentage?: string;
 }) {
   const { t } = useI18n();
+  const { viewingTerm, viewingAcademicYear, historicalReadOnly } = useTermContext();
+  const term = useMemo(() => (initialTerm?.trim() ? initialTerm.trim() : viewingTerm), [initialTerm, viewingTerm]);
+
   const [studentSearch, setStudentSearch] = useState("");
   const [studentMatches, setStudentMatches] = useState<StudentApiRow[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<StudentApiRow | null>(null);
-  const [term, setTerm] = useState(initialTerm ?? "Term 1");
   const [percentage, setPercentage] = useState(initialPercentage ?? "0");
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
   const [expectedBase, setExpectedBase] = useState<number | null>(null);
-  
   const [submitting, setSubmitting] = useState(false);
   const [statusMsg, setStatusMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    description: string;
+    variant: "danger" | "warning" | "info";
+    onConfirm: () => void;
+  } | null>(null);
+  const [expiryState, setExpiryState] = useState<ExpiryState>(null);
+  const [expiryDismissed, setExpiryDismissed] = useState(false);
+  const [bursaryRows, setBursaryRows] = useState<BursaryRow[]>([]);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [tableFilter, setTableFilter] = useState("");
 
-  useEffect(() => {
-    setTerm(initialTerm ?? "Term 1");
-  }, [initialTerm]);
+  const formRef = useRef<HTMLDivElement | null>(null);
+  const sliderRef = useRef<HTMLInputElement | null>(null);
+  const autoRevokedRef = useRef<number | null>(null);
+
+  const percentageNumber = useMemo(() => Number(percentage) || 0, [percentage]);
+  const discountAmount = useMemo(() => {
+    if (expectedBase == null || percentageNumber <= 0) return 0;
+    return Math.round((expectedBase * percentageNumber) / 100);
+  }, [expectedBase, percentageNumber]);
+  const activeNow = useMemo(
+    () => isBursaryActive(selectedStudent?.bursaryStartsAt ?? null, selectedStudent?.bursaryEndsAt ?? null),
+    [selectedStudent],
+  );
+  const currentBalance = useMemo(() => {
+    if (expectedBase == null) return null;
+    if (!activeNow) return expectedBase;
+    if (expiryState?.kind === "expired") return expectedBase;
+    return expectedBase - discountAmount;
+  }, [expectedBase, discountAmount, activeNow, expiryState]);
+
+  const bursaryDurationDays = useMemo(() => {
+    if (!startsAt || !endsAt) return null;
+    const diff = new Date(endsAt).getTime() - new Date(startsAt).getTime();
+    return diff > 0 ? Math.ceil(diff / (1000 * 60 * 60 * 24)) : null;
+  }, [startsAt, endsAt]);
+
+  const loadExpectedBase = useCallback(
+    async (studentId: number) => {
+      try {
+        const data = await fetchStudentStatement(studentId, term, viewingAcademicYear);
+        setExpectedBase(data.assignedAmount);
+      } catch {
+        setExpectedBase(null);
+      }
+    },
+    [term, viewingAcademicYear],
+  );
+
+  const loadBursaryTable = useCallback(async () => {
+    setTableLoading(true);
+    try {
+      const rows = await fetchActiveBursaries(term, viewingAcademicYear);
+      setBursaryRows(rows);
+    } catch {
+      setBursaryRows([]);
+    } finally {
+      setTableLoading(false);
+    }
+  }, [term, viewingAcademicYear]);
 
   useEffect(() => {
     setPercentage(initialPercentage ?? "0");
   }, [initialPercentage]);
+
+  useEffect(() => {
+    void loadBursaryTable();
+  }, [loadBursaryTable]);
 
   useEffect(() => {
     if (!initialStudentId) return;
@@ -57,26 +154,23 @@ export function AssignBursaryPage({
         if (cancelled) return;
         setSelectedStudent(student);
         setStudentSearch(studentLabel(student));
+        setPercentage(String(Number(student.bursaryPercentage) || Number(initialPercentage) || 0));
         setStartsAt(toDateTimeLocalValue(student.bursaryStartsAt));
         setEndsAt(toDateTimeLocalValue(student.bursaryEndsAt));
         setStudentMatches([]);
+        setExpiryDismissed(false);
       })
       .catch(() => {
-        if (!cancelled) {
-          setStatusMsg({ type: "error", text: "Failed to load selected student." });
-        }
+        if (!cancelled) setStatusMsg({ type: "error", text: "Failed to load selected student." });
       })
       .finally(() => {
-        if (!cancelled) {
-          setSearchLoading(false);
-        }
+        if (!cancelled) setSearchLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [initialStudentId]);
+  }, [initialStudentId, initialPercentage]);
 
-  // Student search effect
   useEffect(() => {
     if (studentSearch.trim().length < 2) {
       setStudentMatches([]);
@@ -85,8 +179,8 @@ export function AssignBursaryPage({
     let cancelled = false;
     setSearchLoading(true);
     void fetchStudents({ q: studentSearch.trim(), sortBy: "name", sortDir: "asc", limit: 8 })
-      .then((rows) => {
-        if (!cancelled) setStudentMatches(rows);
+      .then((response) => {
+        if (!cancelled) setStudentMatches(response.items);
       })
       .catch(() => {
         if (!cancelled) setStudentMatches([]);
@@ -99,28 +193,69 @@ export function AssignBursaryPage({
     };
   }, [studentSearch]);
 
-  // Fetch student current statement to see base amount when student/term changes
   useEffect(() => {
     if (selectedStudent) {
-      void fetchStudentStatement(selectedStudent.id, term)
-        .then((data) => {
-           // We try to find the structure amount or just use assignedAmount
-           setExpectedBase(data.assignedAmount);
-        })
-        .catch(() => setExpectedBase(null));
+      void loadExpectedBase(selectedStudent.id);
     } else {
       setExpectedBase(null);
     }
-  }, [selectedStudent, term]);
+  }, [selectedStudent, loadExpectedBase]);
+
+  useEffect(() => {
+    if (!selectedStudent?.bursaryEndsAt || Number(selectedStudent.bursaryPercentage || 0) === 0) {
+      setExpiryState(null);
+      return;
+    }
+    const endsMs = new Date(selectedStudent.bursaryEndsAt).getTime();
+    const now = Date.now();
+    const diffMs = endsMs - now;
+    const diffDays = diffMs / (1000 * 60 * 60 * 24);
+    if (diffMs <= 0) {
+      setExpiryState({ kind: "expired", endsAt: selectedStudent.bursaryEndsAt });
+    } else if (diffDays <= 7) {
+      setExpiryState({
+        kind: "expiring_soon",
+        endsAt: selectedStudent.bursaryEndsAt,
+        daysLeft: Math.ceil(diffDays),
+      });
+    } else {
+      setExpiryState(null);
+    }
+  }, [selectedStudent]);
+
+  useEffect(() => {
+    if (expiryState?.kind === "expired" && selectedStudent && autoRevokedRef.current !== selectedStudent.id) {
+      autoRevokedRef.current = selectedStudent.id;
+      void revokeBursary(selectedStudent.id, term)
+        .then(async () => {
+          await loadExpectedBase(selectedStudent.id);
+          await loadBursaryTable();
+        })
+        .catch(() => {
+          // silent by design
+        });
+    }
+  }, [expiryState, selectedStudent, term, loadExpectedBase, loadBursaryTable]);
 
   const handleApply = async () => {
     if (!selectedStudent) return;
-    if (!Number.isFinite(Number(percentage)) || Number(percentage) <= 0) {
+    if (historicalReadOnly) {
+      setStatusMsg({
+        type: "error",
+        text: "Only administrators can change bursaries when viewing a past term.",
+      });
+      return;
+    }
+    if (!Number.isFinite(percentageNumber) || percentageNumber <= 0) {
       setStatusMsg({ type: "error", text: "Bursary percentage must be greater than 0." });
       return;
     }
     if (!startsAt || !endsAt) {
       setStatusMsg({ type: "error", text: "Bursary start and end dates are required." });
+      return;
+    }
+    if (new Date(endsAt).getTime() <= Date.now()) {
+      setStatusMsg({ type: "error", text: "Bursary end date must be in the future." });
       return;
     }
     if (new Date(endsAt).getTime() <= new Date(startsAt).getTime()) {
@@ -132,7 +267,7 @@ export function AssignBursaryPage({
     try {
       await assignBursary({
         studentId: selectedStudent.id,
-        percentage: Number(percentage),
+        percentage: percentageNumber,
         term,
         startsAt: startsAt ? new Date(startsAt).toISOString() : null,
         endsAt: endsAt ? new Date(endsAt).toISOString() : null,
@@ -141,10 +276,8 @@ export function AssignBursaryPage({
         type: "success",
         text: `${t("finance.bursary.status.success")} ${percentage}% for ${term}.`,
       });
-      
-      // Refresh base fee display
-      const data = await fetchStudentStatement(selectedStudent.id, term);
-      setExpectedBase(data.assignedAmount);
+      await loadExpectedBase(selectedStudent.id);
+      await loadBursaryTable();
     } catch (e) {
       setStatusMsg({ type: "error", text: e instanceof Error ? e.message : "Failed to assign bursary" });
     } finally {
@@ -152,60 +285,116 @@ export function AssignBursaryPage({
     }
   };
 
-  const handleRevoke = async () => {
-    if (!selectedStudent) return;
-    if (!window.confirm("Are you sure you want to revoke this student's bursary? Fees will return to standard rates.")) return;
-    
-    setStatusMsg(null);
-    setSubmitting(true);
-    try {
-      await revokeBursary(selectedStudent.id, term);
-      setPercentage("0");
-      setStartsAt("");
-      setEndsAt("");
-      setStatusMsg({ type: "success", text: t("finance.bursary.status.revoked") });
-      
-      // Refresh base fee display
-      const data = await fetchStudentStatement(selectedStudent.id, term);
-      setExpectedBase(data.assignedAmount);
-    } catch (e) {
-      setStatusMsg({ type: "error", text: e instanceof Error ? e.message : "Failed to revoke bursary" });
-    } finally {
-      setSubmitting(false);
-    }
+  const handleRevoke = useCallback(
+    async (student?: Pick<StudentApiRow, "id">) => {
+      const targetStudent = student?.id != null ? selectedStudent && selectedStudent.id === student.id ? selectedStudent : null : selectedStudent;
+      const targetId = student?.id ?? selectedStudent?.id;
+      if (!targetId) return;
+      if (historicalReadOnly) {
+        setStatusMsg({
+          type: "error",
+          text: "Only administrators can change bursaries when viewing a past term.",
+        });
+        return;
+      }
+      setConfirmModal({
+        title: "Revoke bursary award",
+        description: "Are you sure you want to revoke this student's bursary? Fees will return to standard rates.",
+        variant: "danger",
+        onConfirm: () => {
+          setConfirmModal(null);
+          void (async () => {
+            setStatusMsg(null);
+            setSubmitting(true);
+            try {
+              await revokeBursary(targetId, term);
+              if (targetStudent || selectedStudent?.id === targetId) {
+                setPercentage("0");
+                setStartsAt("");
+                setEndsAt("");
+                setExpiryState(null);
+              }
+              setStatusMsg({ type: "success", text: t("finance.bursary.status.revoked") });
+              if (selectedStudent?.id === targetId) {
+                await loadExpectedBase(targetId);
+              }
+              await loadBursaryTable();
+            } catch (e) {
+              setStatusMsg({ type: "error", text: e instanceof Error ? e.message : "Failed to revoke bursary" });
+            } finally {
+              setSubmitting(false);
+            }
+          })();
+        },
+      });
+    },
+    [selectedStudent, historicalReadOnly, term, t, loadExpectedBase, loadBursaryTable],
+  );
+
+  const handleExtendFromExpiry = () => {
+    const now = new Date();
+    const plus90 = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
+    setEndsAt(toDateTimeLocalValue(plus90.toISOString()));
+    setExpiryDismissed(false);
+    formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  const discountedPreview = expectedBase != null 
-    ? Math.round(expectedBase * (1 - (Number(percentage) || 0) / 100))
-    : null;
+  const handleAssignNewFromExpiry = () => {
+    setPercentage("0");
+    setStartsAt("");
+    setEndsAt("");
+    setExpiryDismissed(false);
+    sliderRef.current?.focus();
+  };
+
+  const filteredRows = useMemo(() => {
+    const q = tableFilter.trim().toLowerCase();
+    if (!q) return bursaryRows;
+    return bursaryRows.filter(
+      (r) =>
+        r.fullName.toLowerCase().includes(q) ||
+        r.admissionNumber.toLowerCase().includes(q),
+    );
+  }, [bursaryRows, tableFilter]);
+
+  const totals = useMemo(() => {
+    return filteredRows.reduce(
+      (acc, row) => {
+        acc.termFee += Number(row.termFee) || 0;
+        acc.discount += Number(row.discountAmount) || 0;
+        acc.balance += Number(row.currentBalance) || 0;
+        return acc;
+      },
+      { termFee: 0, discount: 0, balance: 0 },
+    );
+  }, [filteredRows]);
+
+  const isFormReady =
+    !historicalReadOnly &&
+    !submitting &&
+    !!startsAt &&
+    !!endsAt &&
+    Number.isFinite(percentageNumber) &&
+    percentageNumber > 0;
+
+  const selectedBursaryPct = Number(selectedStudent?.bursaryPercentage || 0);
+  // Live preview should follow slider immediately.
+  const effectiveDiscount = percentageNumber > 0 ? discountAmount : 0;
 
   return (
-    <div style={{ maxWidth: 800, margin: "0 auto", paddingBottom: 40 }}>
-      {/* Header */}
-      <div style={{ marginBottom: 32 }}>
-        <h1 style={{ color: "#0c2340", fontWeight: 800, fontSize: "1.75rem", margin: 0 }}>
-          {t("finance.bursary.assignTitle")}
-        </h1>
-        <p style={{ color: "#64748b", marginTop: 4 }}>
-          {t("finance.bursary.assignDesc")}
-        </p>
+    <div className="max-w-3xl mx-auto pb-10">
+      <div className="mb-8">
+        <h1 className="text-[#0c2340] font-black text-2xl m-0">{t("finance.bursary.assignTitle")}</h1>
+        <p className="text-slate-500 mt-1">{t("finance.bursary.assignDesc")}</p>
       </div>
 
-      <div style={{ 
-        background: "#fff", 
-        borderRadius: 24, 
-        padding: 32, 
-        border: "1px solid #e2e8f0", 
-        boxShadow: "0 4px 6px -1px rgba(0,0,0,0.05)" 
-      }}>
-        
-        {/* Search & Term Section */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 32 }}>
-          <div style={{ position: "relative" }}>
-            <label style={{ display: "block", fontWeight: 700, fontSize: "0.85rem", color: "#475569", marginBottom: 8 }}>
+      <div ref={formRef} className="neo-card rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
+        <div className="grid gap-6 md:grid-cols-2 mb-8">
+          <div className="relative">
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
               {t("finance.bursary.field.search")}
             </label>
-            <div style={{ position: "relative" }}>
+            <div className="relative">
               <input
                 type="text"
                 value={studentSearch}
@@ -214,172 +403,168 @@ export function AssignBursaryPage({
                   if (selectedStudent) setSelectedStudent(null);
                 }}
                 placeholder="Name or Admission #"
-                style={{
-                  width: "100%",
-                  height: 48,
-                  padding: "0 16px",
-                  borderRadius: 12,
-                  border: "2px solid #e2e8f0",
-                  fontSize: "1rem",
-                  boxSizing: "border-box",
-                  outline: "none"
-                }}
+                className="neo-inset-field w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-[#2d3436] outline-none focus:ring-2 focus:ring-[#5a8faf]/40"
               />
-              {searchLoading && (
-                <div style={{ position: "absolute", right: 12, top: 14 }}>
+              {searchLoading ? (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
                   <div className="animate-spin h-5 w-5 border-2 border-[#0c2340] border-t-transparent rounded-full" />
                 </div>
-              )}
+              ) : null}
             </div>
 
-            {/* Suggestions list */}
-            {studentMatches.length > 0 && !selectedStudent && (
-              <div style={{
-                position: "absolute",
-                top: "100%",
-                left: 0,
-                right: 0,
-                background: "#fff",
-                border: "1px solid #e2e8f0",
-                borderRadius: 12,
-                marginTop: 4,
-                boxShadow: "0 10px 15px -3px rgba(0,0,0,0.1)",
-                zIndex: 50,
-                maxHeight: 240,
-                overflowY: "auto"
-              }}>
-                {studentMatches.map(s => (
+            {studentMatches.length > 0 && !selectedStudent ? (
+              <div className="absolute left-0 right-0 top-full z-50 mt-2 max-h-60 overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-xl">
+                {studentMatches.map((s) => (
                   <button
                     key={s.id}
+                    type="button"
                     onClick={() => {
                       setSelectedStudent(s);
                       setStudentSearch(studentLabel(s));
+                      setPercentage(String(Number(s.bursaryPercentage) || 0));
                       setStartsAt(toDateTimeLocalValue(s.bursaryStartsAt));
                       setEndsAt(toDateTimeLocalValue(s.bursaryEndsAt));
                       setStudentMatches([]);
+                      setExpiryDismissed(false);
                     }}
-                    style={{
-                      width: "100%",
-                      padding: "12px 16px",
-                      textAlign: "left",
-                      border: "none",
-                      background: "none",
-                      borderBottom: "1px solid #f1f5f9",
-                      cursor: "pointer"
-                    }}
+                    className="w-full border-b border-slate-50 px-4 py-3 text-left hover:bg-slate-50"
                   >
-                    <div style={{ fontWeight: 700, color: "#1e293b" }}>{s.fullName}</div>
-                    <div style={{ fontSize: "0.75rem", color: "#64748b" }}>{s.admissionNumber} • {s.className}</div>
+                    <div className="font-bold text-slate-800">{s.fullName}</div>
+                    <div className="text-xs font-medium text-slate-500">
+                      {s.admissionNumber} • {s.className}
+                    </div>
                   </button>
                 ))}
               </div>
-            )}
+            ) : null}
           </div>
 
           <div>
-            <label style={{ display: "block", fontWeight: 700, fontSize: "0.85rem", color: "#475569", marginBottom: 8 }}>
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
               {t("finance.bursary.field.term")}
             </label>
-            <select
-              value={term}
-              onChange={(e) => setTerm(e.target.value)}
-              style={{
-                width: "100%",
-                height: 48,
-                padding: "0 16px",
-                borderRadius: 12,
-                border: "2px solid #e2e8f0",
-                fontSize: "1rem",
-                background: "#fff",
-                outline: "none"
-              }}
-            >
-              <option value="Term 1">Term 1</option>
-              <option value="Term 2">Term 2</option>
-              <option value="Term 3">Term 3</option>
-            </select>
+            <div className="neo-inset-field w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-700 bg-slate-50">
+              <span className="font-black">{term}</span>{" "}
+              <span className="ml-2 text-xs font-semibold text-slate-500">
+                {initialTerm?.trim() ? "(from record)" : "(header picker)"}
+              </span>
+            </div>
           </div>
         </div>
 
-        {/* Selected Student Details */}
-        {selectedStudent && (
-          <div style={{ 
-            background: "#f8fafc", 
-            borderRadius: 16, 
-            padding: 24, 
-            marginBottom: 32,
-            border: "1px solid #f1f5f9"
-          }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <h3 style={{ margin: 0, color: "#0c2340", fontSize: "1.1rem" }}>{selectedStudent.fullName}</h3>
-                <p style={{ margin: "4px 0 0", color: "#64748b", fontSize: "0.9rem" }}>
-                  {selectedStudent.className} • {selectedStudent.boardingStatus?.replace("_", " ")}
+        {selectedStudent ? (
+          <>
+            <div className="rounded-2xl bg-gradient-to-br from-[#0c2340] to-[#1e3a8a] p-6 text-white flex items-center justify-between mb-6">
+              <div className="min-w-0">
+                <p className="text-xs font-black uppercase tracking-widest text-white/80">
+                  {selectedStudent.fullName}
+                </p>
+                <p className="mt-1 text-sm font-semibold text-white/90">
+                  {selectedStudent.className} • {normalizeStatusLabel(selectedStudent.boardingStatus)}
                 </p>
               </div>
-              <div style={{ textAlign: "right" }}>
-                <span style={{ 
-                  display: "inline-block", 
-                  padding: "4px 12px", 
-                  background: "#e2e8f0", 
-                  borderRadius: 20, 
-                  fontSize: "0.75rem", 
-                  fontWeight: 800, 
-                  color: "#475569" 
-                }}>
+              <div className="text-right">
+                <div className="inline-flex items-center rounded-full bg-white/10 px-4 py-2 text-xs font-black tracking-widest">
                   {selectedStudent.admissionNumber}
-                </span>
+                </div>
               </div>
             </div>
 
-            <hr style={{ margin: "20px 0", border: 0, borderTop: "1px solid #e2e8f0" }} />
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-              <div className="neo-card p-4 bg-white">
-                <p style={{ fontSize: "0.7rem", fontWeight: 800, color: "#64748b", textTransform: "uppercase" }}>Standard Term Fee</p>
-                <p style={{ fontSize: "1.25rem", fontWeight: 900, color: "#0c2340", margin: "4px 0 0" }}>
-                  {expectedBase != null ? formatCurrencyUGX(expectedBase) : "—"}
-                </p>
+            {expiryState !== null && !expiryDismissed ? (
+              <div
+                className={
+                  expiryState.kind === "expired"
+                    ? "mb-6 rounded-2xl border border-red-300 bg-red-50 px-5 py-4"
+                    : "mb-6 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4"
+                }
+              >
+                {expiryState.kind === "expiring_soon" ? (
+                  <>
+                    <p className="text-sm font-black text-amber-900">
+                      ⏱ Bursary expires in {expiryState.daysLeft} day(s) — {formatDate(expiryState.endsAt)}
+                    </p>
+                    <p className="mt-1 text-xs font-semibold text-amber-800">
+                      This student's fees will revert to {expectedBase != null ? formatCurrencyUGX(expectedBase) : "standard rate"} on expiry.
+                    </p>
+                    <div className="mt-3 flex gap-2 justify-end">
+                      <button type="button" onClick={handleExtendFromExpiry} className="rounded-lg border border-amber-400 bg-white px-3 py-1.5 text-xs font-black text-amber-900">
+                        Extend Bursary
+                      </button>
+                      <button type="button" onClick={() => setExpiryDismissed(true)} className="rounded-lg border border-amber-300 bg-amber-100 px-3 py-1.5 text-xs font-black text-amber-900">
+                        Dismiss
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-black text-red-900">❌ Bursary expired on {formatDate(expiryState.endsAt)}</p>
+                    <p className="mt-1 text-xs font-semibold text-red-800">
+                      Fees have reverted to standard rate: {expectedBase != null ? formatCurrencyUGX(expectedBase) : "—"}.
+                      This student has been removed from the active bursary list.
+                    </p>
+                    <div className="mt-3 flex gap-2 justify-end">
+                      <button type="button" onClick={handleAssignNewFromExpiry} className="rounded-lg border border-red-400 bg-white px-3 py-1.5 text-xs font-black text-red-900">
+                        Assign New Bursary
+                      </button>
+                      <button type="button" onClick={() => setExpiryDismissed(true)} className="rounded-lg border border-red-300 bg-red-100 px-3 py-1.5 text-xs font-black text-red-900">
+                        Dismiss
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
-              <div className="neo-card p-4 bg-[#f1fcf8] border-[#10b981]/20">
-                <p style={{ fontSize: "0.7rem", fontWeight: 800, color: "#059669", textTransform: "uppercase" }}>Current Bursary</p>
-                <p style={{ fontSize: "1.25rem", fontWeight: 900, color: "#059669", margin: "4px 0 0" }}>
-                  {selectedStudent.bursaryPercentage || 0}%
-                </p>
+            ) : null}
+
+            <div className="rounded-2xl bg-gradient-to-br from-[#0c2340] to-[#1e3a8a] p-5 text-white mb-8">
+              <div className="grid gap-4 md:grid-cols-3">
+                <div>
+                  <p className="text-[11px] font-black uppercase tracking-widest text-white/75">Total Assigned Fees</p>
+                  <p className="mt-2 text-2xl font-black">{expectedBase != null ? formatCurrencyUGX(expectedBase) : "—"}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-black uppercase tracking-widest text-white/75">Bursary Discount</p>
+                  <p className="mt-2 text-lg font-black" style={{ color: "#6ee7b7" }}>
+                    {percentageNumber > 0 ? `${percentageNumber}% = ${formatCurrencyUGX(effectiveDiscount)}` : "—"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-black uppercase tracking-widest text-white/75">Current Balance</p>
+                  <p className="mt-2 text-2xl font-black" style={{ color: "#fbbf24" }}>
+                    {currentBalance != null ? formatCurrencyUGX(currentBalance) : "—"}
+                  </p>
+                  {!activeNow && selectedStudent.bursaryStartsAt && selectedStudent.bursaryEndsAt ? (
+                    <span
+                      className={
+                        new Date(selectedStudent.bursaryEndsAt).getTime() <= Date.now()
+                          ? "mt-2 inline-flex rounded-full bg-red-100 px-2 py-1 text-[10px] font-black text-red-700"
+                          : "mt-2 inline-flex rounded-full bg-amber-100 px-2 py-1 text-[10px] font-black text-amber-800"
+                      }
+                    >
+                      {new Date(selectedStudent.bursaryEndsAt).getTime() <= Date.now()
+                        ? `Expired ${formatDate(selectedStudent.bursaryEndsAt)}`
+                        : `Starts ${formatDate(selectedStudent.bursaryStartsAt)}`}
+                    </span>
+                  ) : null}
+                </div>
               </div>
             </div>
-          </div>
-        )}
 
-        {/* Assignment Form */}
-        {selectedStudent && (
-          <div style={{ display: "grid", gap: 24 }}>
-            <div style={{ marginBottom: 24 }}>
-              <label style={{ display: "block", fontWeight: 700, fontSize: "0.85rem", color: "#475569", marginBottom: 12 }}>
+            <div className="mb-8">
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
                 {t("finance.bursary.field.percentage")}
               </label>
-              <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+              <div className="flex flex-wrap items-center gap-4">
                 <input
+                  ref={sliderRef}
                   type="range"
                   min="0"
                   max="100"
                   step="5"
                   value={percentage}
                   onChange={(e) => setPercentage(e.target.value)}
-                  style={{ flex: 1, accentColor: "#0c2340" }}
+                  className="flex-1 accent-[#0c2340]"
                 />
-                <div style={{ 
-                  width: 80, 
-                  height: 48, 
-                  background: "#0c2340", 
-                  color: "#fff", 
-                  borderRadius: 12, 
-                  display: "flex", 
-                  alignItems: "center", 
-                  justifyContent: "center",
-                  fontSize: "1.1rem",
-                  fontWeight: 800
-                }}>
+                <div className="h-12 w-20 rounded-xl bg-[#0c2340] text-white flex items-center justify-center font-black">
                   {percentage}%
                 </div>
                 <input
@@ -389,23 +574,14 @@ export function AssignBursaryPage({
                   step="0.1"
                   value={percentage}
                   onChange={(e) => setPercentage(e.target.value)}
-                  style={{
-                    width: 120,
-                    height: 48,
-                    padding: "0 12px",
-                    borderRadius: 12,
-                    border: "2px solid #e2e8f0",
-                    fontSize: "1rem",
-                    fontWeight: 700,
-                    outline: "none",
-                  }}
+                  className="neo-inset-field w-32 rounded-xl px-4 py-2.5 text-sm font-semibold text-[#2d3436] outline-none focus:ring-2 focus:ring-[#5a8faf]/40"
                 />
               </div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 24 }}>
+            <div className="grid gap-4 md:grid-cols-2 mb-4">
               <div>
-                <label style={{ display: "block", fontWeight: 700, fontSize: "0.85rem", color: "#475569", marginBottom: 8 }}>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
                   Bursary starts at *
                 </label>
                 <input
@@ -413,19 +589,11 @@ export function AssignBursaryPage({
                   value={startsAt}
                   onChange={(e) => setStartsAt(e.target.value)}
                   required
-                  style={{
-                    width: "100%",
-                    height: 48,
-                    padding: "0 12px",
-                    borderRadius: 12,
-                    border: "2px solid #e2e8f0",
-                    fontSize: "0.95rem",
-                    outline: "none",
-                  }}
+                  className="neo-inset-field w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-[#2d3436] outline-none focus:ring-2 focus:ring-[#5a8faf]/40"
                 />
               </div>
               <div>
-                <label style={{ display: "block", fontWeight: 700, fontSize: "0.85rem", color: "#475569", marginBottom: 8 }}>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
                   Bursary ends at *
                 </label>
                 <input
@@ -433,113 +601,241 @@ export function AssignBursaryPage({
                   value={endsAt}
                   onChange={(e) => setEndsAt(e.target.value)}
                   required
-                  style={{
-                    width: "100%",
-                    height: 48,
-                    padding: "0 12px",
-                    borderRadius: 12,
-                    border: "2px solid #e2e8f0",
-                    fontSize: "0.95rem",
-                    outline: "none",
-                  }}
+                  className="neo-inset-field w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-[#2d3436] outline-none focus:ring-2 focus:ring-[#5a8faf]/40"
                 />
               </div>
             </div>
 
-            {/* Preview Card */}
-            <div style={{ 
-              background: "linear-gradient(135deg, #0c2340, #1e3a8a)", 
-              borderRadius: 16, 
-              padding: 24, 
-              color: "#fff",
-              marginBottom: 32,
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center"
-            }}>
-              <div>
-                <p style={{ margin: 0, opacity: 0.8, fontSize: "0.8rem", fontWeight: 700, textTransform: "uppercase" }}>
-                  {t("finance.bursary.preview.title")}
-                </p>
-                <h3 style={{ margin: "4px 0 0", fontSize: "1.75rem", fontWeight: 900 }}>
-                  {discountedPreview != null ? formatCurrencyUGX(discountedPreview) : "—"}
-                </h3>
+            {bursaryDurationDays != null ? (
+              <div className="mb-8">
+                <span className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-4 py-1.5 text-xs font-bold text-slate-600">
+                  📅 Duration: {bursaryDurationDays} day{bursaryDurationDays === 1 ? "" : "s"} (from {formatDate(startsAt)} to {formatDate(endsAt)})
+                </span>
               </div>
-              <div style={{ textAlign: "right" }}>
-                <p style={{ margin: 0, opacity: 0.8, fontSize: "0.75rem" }}>
-                  {t("finance.bursary.preview.savings")}
-                </p>
-                <p style={{ margin: 0, fontWeight: 800, color: "#10b981" }}>
-                   -{expectedBase != null && discountedPreview != null ? formatCurrencyUGX(expectedBase - discountedPreview) : "—"}
-                </p>
-              </div>
-            </div>
+            ) : null}
 
-            {statusMsg && (
-              <div style={{ 
-                padding: 16, 
-                borderRadius: 12, 
-                backgroundColor: statusMsg.type === "success" ? "#ecfdf5" : "#fef2f2",
-                color: statusMsg.type === "success" ? "#065f46" : "#991b1b",
-                border: `1px solid ${statusMsg.type === "success" ? "#10b981" : "#ef4444"}33`,
-                marginBottom: 24,
-                fontSize: "0.9rem",
-                fontWeight: 600
-              }}>
+            {statusMsg ? (
+              <div
+                className={
+                  statusMsg.type === "success"
+                    ? "rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-sm font-bold text-emerald-800 mb-6"
+                    : "rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm font-bold text-red-800 mb-6"
+                }
+              >
                 {statusMsg.text}
               </div>
-            )}
+            ) : null}
 
-            <div style={{ display: "flex", gap: 16 }}>
+            <div className="flex gap-4">
               <button
-                disabled={submitting || !startsAt || !endsAt || !Number.isFinite(Number(percentage)) || Number(percentage) <= 0}
+                type="button"
+                disabled={!isFormReady}
                 onClick={handleApply}
-                style={{
-                  flex: 2,
-                  height: 56,
-                  background: "linear-gradient(135deg, #0c2340, #1a3a5c)",
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 16,
-                  fontWeight: 800,
-                  fontSize: "1rem",
-                  cursor: (submitting || !startsAt || !endsAt || !Number.isFinite(Number(percentage)) || Number(percentage) <= 0) ? "not-allowed" : "pointer",
-                  opacity: (submitting || !startsAt || !endsAt || !Number.isFinite(Number(percentage)) || Number(percentage) <= 0) ? 0.7 : 1,
-                  boxShadow: "0 4px 12px rgba(12,35,64,0.2)"
-                }}
+                className="flex-[2] h-14 rounded-2xl bg-gradient-to-r from-[#0c2340] to-[#1a3a5c] text-white font-black text-sm shadow-lg transition-all hover:shadow-xl disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {submitting ? "Processing..." : t("finance.bursary.btn.apply")}
               </button>
               <button
-                disabled={submitting || Number(selectedStudent.bursaryPercentage || 0) === 0}
-                onClick={handleRevoke}
-                style={{
-                  flex: 1,
-                  height: 56,
-                  background: "#fff",
-                  color: "#ef4444",
-                  border: "2px solid #ef4444",
-                  borderRadius: 16,
-                  fontWeight: 800,
-                  fontSize: "1rem",
-                  cursor: (submitting || Number(selectedStudent.bursaryPercentage || 0) === 0) ? "not-allowed" : "pointer",
-                  opacity: (submitting || Number(selectedStudent.bursaryPercentage || 0) === 0) ? 0.5 : 1
-                }}
+                type="button"
+                disabled={historicalReadOnly || submitting || Number(selectedStudent.bursaryPercentage || 0) === 0}
+                onClick={() => void handleRevoke()}
+                className="flex-1 h-14 rounded-2xl border-2 border-red-400 bg-white text-red-500 font-black text-sm transition-all hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {t("finance.bursary.btn.revoke")}
               </button>
             </div>
+          </>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+            <div className="text-4xl mb-4">🔎</div>
+            <p className="text-sm font-bold">Select a student to manage their bursary.</p>
           </div>
         )}
-
-        {!selectedStudent && (
-          <div style={{ textAlign: "center", padding: "40px 0", color: "#94a3b8" }}>
-            <div style={{ fontSize: "3rem", marginBottom: 16 }}>🔎</div>
-            <p style={{ fontWeight: 600 }}>Select a student to manage their bursary.</p>
-          </div>
-        )}
-
       </div>
+
+      <hr className="my-8 border-slate-200" />
+
+      <section className="neo-card rounded-2xl border border-slate-200 bg-white p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <p className="text-xs font-black uppercase tracking-widest text-[#0c2340] m-0">
+            Active Bursaries — {term}
+          </p>
+          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-black text-slate-700">
+            {filteredRows.length} students
+          </span>
+        </div>
+
+        <div className="mb-2 flex items-center justify-end gap-3">
+          <input
+            type="text"
+            value={tableFilter}
+            onChange={(e) => setTableFilter(e.target.value)}
+            placeholder="Filter by name or adm no…"
+            style={{
+              height: 30,
+              width: 200,
+              fontSize: 12,
+              border: "1px solid #7b9cbf",
+              padding: "0 8px",
+              outline: "none",
+            }}
+          />
+          <span className="text-[11px] font-bold text-slate-500">
+            Showing {filteredRows.length} of {bursaryRows.length}
+          </span>
+        </div>
+
+        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 400, border: "2px solid #7b9cbf" }}>
+          {tableLoading ? (
+            <div className="py-10 text-center text-sm font-semibold text-slate-400">Loading active bursaries…</div>
+          ) : filteredRows.length === 0 ? (
+            <div className="py-12 text-center text-sm text-slate-400">
+              No active bursaries for {term}.
+              <br />
+              Assign a bursary above to see students listed here.
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", borderSpacing: 0, borderRadius: 0, fontSize: 12 }}>
+              <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
+                <tr>
+                  {[
+                    "No.",
+                    "Adm No.",
+                    "Student Name",
+                    "Class",
+                    "Status",
+                    "Term Fee (UGX)",
+                    "Bursary %",
+                    "Discount (UGX)",
+                    "Balance (UGX)",
+                    "Starts",
+                    "Expires",
+                    "Days Left",
+                    "Actions",
+                  ].map((head) => (
+                    <th
+                      key={head}
+                      style={{
+                        background: "#dce6f1",
+                        border: "1px solid #7b9cbf",
+                        height: 28,
+                        padding: "0 6px",
+                        textAlign: head.includes("(UGX)") ? "right" : head === "Bursary %" || head === "Days Left" ? "center" : "left",
+                        fontWeight: 800,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {head}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRows.map((row, idx) => {
+                  const rowDays = Number.isFinite(row.daysRemaining) ? row.daysRemaining : daysRemaining(row.endsAt);
+                  const isExpiringSoon = rowDays >= 0 && rowDays <= 7;
+                  const isExpired = rowDays < 0;
+                  const isSelected = selectedStudent?.id === row.studentId;
+                  const rowBg = isExpired
+                    ? "#fff1f2"
+                    : isSelected
+                      ? "#eff6ff"
+                      : isExpiringSoon
+                        ? "#fffbeb"
+                        : idx % 2 === 0
+                          ? "#ffffff"
+                          : "#f5f9ff";
+                  const leftBorder = isSelected
+                    ? "3px solid #1d4ed8"
+                    : isExpired
+                      ? "3px solid #ef4444"
+                      : isExpiringSoon
+                        ? "3px solid #f59e0b"
+                        : "1px solid #c8d8e8";
+                  const baseColor = isExpired ? "#6b7280" : "#1f2937";
+                  return (
+                    <tr key={`${row.studentId}-${row.startsAt}-${row.endsAt}`} style={{ background: rowBg, color: baseColor, height: 26 }}>
+                      <td style={{ width: 40, border: "1px solid #c8d8e8", borderLeft: leftBorder, padding: "0 6px" }}>{idx + 1}</td>
+                      <td style={{ width: 90, border: "1px solid #c8d8e8", padding: "0 6px" }}>{row.admissionNumber}</td>
+                      <td style={{ width: 200, border: "1px solid #c8d8e8", padding: "0 6px", fontWeight: 700 }}>{row.fullName}</td>
+                      <td style={{ width: 80, border: "1px solid #c8d8e8", padding: "0 6px" }}>{row.className}</td>
+                      <td style={{ width: 90, border: "1px solid #c8d8e8", padding: "0 6px" }}>{normalizeStatusLabel(row.boardingStatus)}</td>
+                      <td style={{ width: 130, border: "1px solid #c8d8e8", padding: "0 6px", textAlign: "right" }}>{formatCurrencyUGX(row.termFee)}</td>
+                      <td style={{ width: 80, border: "1px solid #c8d8e8", padding: "0 6px", textAlign: "center", fontWeight: 700 }}>{row.bursaryPercentage}%</td>
+                      <td style={{ width: 130, border: "1px solid #c8d8e8", padding: "0 6px", textAlign: "right", color: isExpired ? "#6b7280" : "#b91c1c", fontWeight: 700 }}>
+                        {formatCurrencyUGX(row.discountAmount)}
+                      </td>
+                      <td style={{ width: 130, border: "1px solid #c8d8e8", padding: "0 6px", textAlign: "right", color: isExpired ? "#6b7280" : "#15803d", fontWeight: 700 }}>
+                        {formatCurrencyUGX(row.currentBalance)}
+                      </td>
+                      <td style={{ width: 110, border: "1px solid #c8d8e8", padding: "0 6px" }}>{formatDate(row.startsAt)}</td>
+                      <td style={{ width: 110, border: "1px solid #c8d8e8", padding: "0 6px" }}>{formatDate(row.endsAt)}</td>
+                      <td style={{ width: 80, border: "1px solid #c8d8e8", padding: "0 6px", textAlign: "center", fontWeight: 800, color: isExpired ? "#b91c1c" : isExpiringSoon ? "#b45309" : baseColor }}>
+                        {isExpired ? "Expired" : rowDays}
+                      </td>
+                      <td style={{ width: 120, border: "1px solid #c8d8e8", padding: "0 6px" }}>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void fetchStudent(row.studentId).then((student) => {
+                                setSelectedStudent(student);
+                                setStudentSearch(studentLabel(student));
+                                setPercentage(String(Number(student.bursaryPercentage) || 0));
+                                setStartsAt(toDateTimeLocalValue(student.bursaryStartsAt));
+                                setEndsAt(toDateTimeLocalValue(student.bursaryEndsAt));
+                                setExpiryDismissed(false);
+                                formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                              });
+                            }}
+                            style={{ height: 22, padding: "0 8px", border: "1px solid #9ca3af", background: "#fff", fontSize: 11, fontWeight: 700 }}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleRevoke({ id: row.studentId })}
+                            style={{ height: 22, padding: "0 8px", border: "1px solid #ef4444", background: "#fff", color: "#dc2626", fontSize: 11, fontWeight: 700 }}
+                          >
+                            Revoke
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot style={{ position: "sticky", bottom: 0, zIndex: 9 }}>
+                <tr style={{ background: "#dce6f1", fontWeight: 800 }}>
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }} />
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }} />
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }}>{filteredRows.length} students</td>
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }} />
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }} />
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px", textAlign: "right" }}>Σ {formatCurrencyUGX(totals.termFee)}</td>
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }} />
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px", textAlign: "right" }}>Σ {formatCurrencyUGX(totals.discount)}</td>
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px", textAlign: "right" }}>Σ {formatCurrencyUGX(totals.balance)}</td>
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }} />
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }} />
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }} />
+                  <td style={{ border: "1px solid #7b9cbf", padding: "4px 6px" }} />
+                </tr>
+              </tfoot>
+            </table>
+          )}
+        </div>
+      </section>
+
+      <ConfirmModal
+        open={!!confirmModal}
+        title={confirmModal?.title ?? ""}
+        description={confirmModal?.description ?? ""}
+        variant={confirmModal?.variant ?? "danger"}
+        loading={submitting}
+        onConfirm={confirmModal?.onConfirm ?? (() => undefined)}
+        onCancel={() => setConfirmModal(null)}
+      />
     </div>
   );
 }

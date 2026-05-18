@@ -4,7 +4,7 @@ import { fetchFinanceDashboard } from "../api/financeDashboard";
 import { fetchMessages, type InboxMessageApiItem } from "../api/inbox";
 import { type FinanceDashboardPayload } from "../components/finance/shared/financeTypes";
 import { formatCurrencyUGX } from "../components/finance/shared/financeFormat";
-import { EventScheduleCard, StatCard } from "./OverviewShared";
+import { EventScheduleCard, LiveClock, OverviewErrorBanner, StatCard } from "./OverviewShared";
 
 function TreasuryFlowChart({ transactions, net }: { transactions: FinanceDashboardPayload["recentTransactions"]; net: number }) {
   const { earningsSeries, expenditureSeries, earningsTotal, expenditureTotal } = useMemo(() => {
@@ -134,19 +134,46 @@ function TreasuryFlowChart({ transactions, net }: { transactions: FinanceDashboa
   );
 }
 
-export function AdminOverview({ dash, loading }: { dash: DashboardPayload | null, loading: boolean }) {
+export function AdminOverview({
+  dash,
+  loading,
+  onOpenRecordsSearch,
+  onOpenHistoricalRecords,
+}: {
+  dash: DashboardPayload | null;
+  loading: boolean;
+  onOpenRecordsSearch?: () => void;
+  onOpenHistoricalRecords?: () => void;
+}) {
   const [fin, setFin] = useState<FinanceDashboardPayload | null>(null);
   const [messages, setMessages] = useState<InboxMessageApiItem[]>([]);
-  const [time, setTime] = useState(new Date());
+  const [finError, setFinError] = useState<string | null>(null);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
 
   useEffect(() => {
-    const timer = setInterval(() => setTime(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
+    let cancelled = false;
+    setFinError(null);
+    setMessagesError(null);
 
-  useEffect(() => {
-    fetchFinanceDashboard().then(setFin).catch(console.error);
-    fetchMessages().then(setMessages).catch(console.error);
+    void fetchFinanceDashboard()
+      .then((data) => {
+        if (!cancelled) setFin(data);
+      })
+      .catch((e) => {
+        if (!cancelled) setFinError(e instanceof Error ? e.message : "Failed to load financial summary");
+      });
+
+    void fetchMessages()
+      .then((data) => {
+        if (!cancelled) setMessages(data);
+      })
+      .catch((e) => {
+        if (!cancelled) setMessagesError(e instanceof Error ? e.message : "Failed to load inbox messages");
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (loading && !dash) {
@@ -161,6 +188,16 @@ export function AdminOverview({ dash, loading }: { dash: DashboardPayload | null
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
+      {finError ? (
+        <div className="mb-4">
+          <OverviewErrorBanner message={finError} />
+        </div>
+      ) : null}
+      {messagesError ? (
+        <div className="mb-4">
+          <OverviewErrorBanner message={messagesError} />
+        </div>
+      ) : null}
 
       {/* Header Area */}
       <header className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 border-b border-slate-200 pb-6">
@@ -173,16 +210,26 @@ export function AdminOverview({ dash, loading }: { dash: DashboardPayload | null
           </p>
         </div>
 
-        <div className="flex shadow-sm items-center gap-3 bg-white rounded-xl px-5 py-3 border border-slate-200">
-          <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.8)]"></div>
-          <div className="font-mono flex divide-x divide-slate-200">
-            <span className="text-indigo-600 font-bold tracking-widest pr-3 text-sm">
-              {time.toLocaleTimeString('en-US', { hour12: false })}
-            </span>
-            <span className="text-slate-500 font-bold tracking-wider pl-3 text-sm">
-              {time.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()}
-            </span>
-          </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {onOpenRecordsSearch ? (
+            <button
+              type="button"
+              onClick={onOpenRecordsSearch}
+              className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-black text-indigo-950 shadow-sm transition hover:bg-indigo-100"
+            >
+              Search records
+            </button>
+          ) : null}
+          {onOpenHistoricalRecords ? (
+            <button
+              type="button"
+              onClick={onOpenHistoricalRecords}
+              className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm font-black text-sky-950 shadow-sm transition hover:bg-sky-100"
+            >
+              Historical records
+            </button>
+          ) : null}
+          <LiveClock />
         </div>
       </header>
 

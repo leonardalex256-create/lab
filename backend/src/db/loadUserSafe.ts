@@ -31,13 +31,20 @@ function isUnknownTwoFactorColumnError(e: unknown): boolean {
 export async function loadUserMeFields(
   userId: number,
   jwtFallback: { email: string; role: string },
-): Promise<{ email: string; role: string; twoFactorEnabled: boolean; permissions: string[] }> {
+): Promise<{
+  email: string;
+  role: string;
+  name: string;
+  twoFactorEnabled: boolean;
+  permissions: string[];
+}> {
   try {
     const row = await User.findByPk(userId, {
-      attributes: ["email", "role", "twoFactorEnabled"],
+      attributes: ["fullName", "email", "role", "twoFactorEnabled"],
     });
     const email = row?.email ?? jwtFallback.email;
     const role = row?.role ?? jwtFallback.role;
+    const name = (row?.fullName?.trim() || email.split("@")[0] || "Account User").trim();
     
     const perms = await RolePermission.findAll({ where: { role } });
     const rolePermissions = perms.map((p) => p.permissionKey);
@@ -50,16 +57,18 @@ export async function loadUserMeFields(
     return {
       email,
       role,
+      name,
       twoFactorEnabled: Boolean(row?.twoFactorEnabled),
       permissions
     };
   } catch (e) {
     if (!isUnknownTwoFactorColumnError(e)) throw e;
     const row = await User.findByPk(userId, {
-      attributes: ["email", "role"],
+      attributes: ["fullName", "email", "role"],
     });
     const email = row?.email ?? jwtFallback.email;
     const role = row?.role ?? jwtFallback.role;
+    const name = (row?.fullName?.trim() || email.split("@")[0] || "Account User").trim();
 
     const perms = await RolePermission.findAll({ where: { role } });
     const rolePermissions = perms.map((p) => p.permissionKey);
@@ -72,6 +81,7 @@ export async function loadUserMeFields(
     return {
       email,
       role,
+      name,
       twoFactorEnabled: false,
       permissions
     };

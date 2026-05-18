@@ -366,13 +366,13 @@ export function ClassesSectionPage({
         fetchClassrooms(),
         fetchClassCategories(),
         fetchClassSections(),
-        fetchStudents({ limit: 500 }),
+        fetchStudents({ limit: 200 }),
         fetchTeachers(),
       ]);
       setRooms(roomRows);
       setCategories(categoryRows);
       setSections(sectionRows);
-      setStudents(studentRows);
+      setStudents(studentRows.items);
       setTeachers(teacherRows);
       setError(null);
     } catch (err) {
@@ -1469,6 +1469,7 @@ export function ClassesSectionPage({
         studentId={rosterStudentModal?.studentId ?? null}
         initialEditing
         focusSectionField={rosterStudentModal?.focusSection ?? false}
+        lockClassField={rosterStudentModal?.focusSection ?? false}
         streamOptions={
           rosterStudentModal?.focusSection && rosterStreamNames.length > 0 ? rosterStreamNames : null
         }

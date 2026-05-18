@@ -16,14 +16,22 @@ import { createMeStudentsRouter } from "./routes/meStudents.js";
 import { createMeFinanceDashboardRouter } from "./routes/meFinanceDashboard.js";
 import { createMeFinanceLedgerRouter } from "./routes/meFinanceLedger.js";
 import { createMeFinancePaymentsRouter } from "./routes/meFinancePayments.js";
+import { createMeFinanceHistoricalRouter } from "./routes/meFinanceHistorical.js";
 import { createMeFinanceReportsRouter } from "./routes/meFinanceReports.js";
 import { createMeFinanceStatementsRouter } from "./routes/meFinanceStatements.js";
 import { createMeAcademicsRouter } from "./routes/meAcademics.js";
 import { createMeExamsRouter } from "./routes/meExams.js";
 import { createMeCommunicationNoticesRouter } from "./routes/meCommunicationNotices.js";
 import { createMeFinanceBurseryRouter } from "./routes/meFinanceBursery.js";
+import { createMeRecordsSearchRouter } from "./routes/meRecordsSearch.js";
 import { createMeSettingsRouter } from "./routes/meSettings.js";
 import { createMeStaffRouter } from "./routes/meStaff.js";
+import { createMeParentsRouter } from "./routes/meParents.js";
+import { createMeAttendanceRouter } from "./routes/meAttendance.js";
+import { createMeResultsRouter } from "./routes/meResults.js";
+import { createMeAuditLogRouter } from "./routes/meAuditLog.js";
+import { createMeUploadRouter } from "./routes/meUpload.js";
+import { createForgotPasswordRouter } from "./routes/forgotPassword.js";
 
 export function buildApp(config: Config) {
   const app = express();
@@ -108,6 +116,7 @@ export function buildApp(config: Config) {
   app.use("/api", healthRouter);
   app.use("/api/auth", createAuthRouter(config));
   app.use("/api/auth", createPasswordResetRouter(config));
+  app.use("/api/auth", createForgotPasswordRouter(config));
 
   const meRouter = Router();
   meRouter.use(createMeInboxRouter());
@@ -115,12 +124,19 @@ export function buildApp(config: Config) {
   meRouter.use(createMeGeoRouter());
   meRouter.use(createMeStudentsRouter());
   meRouter.use(createMeStaffRouter());
+  meRouter.use(createMeParentsRouter());
+  meRouter.use(createMeAttendanceRouter());
+  meRouter.use(createMeResultsRouter());
+  meRouter.use(createMeUploadRouter());
+  meRouter.use("/settings", createMeAuditLogRouter());
   meRouter.use(createMeFinanceDashboardRouter());
   meRouter.use(createMeFinanceLedgerRouter());
   meRouter.use(createMeFinancePaymentsRouter());
+  meRouter.use(createMeFinanceHistoricalRouter());
   meRouter.use(createMeFinanceReportsRouter());
   meRouter.use(createMeFinanceStatementsRouter());
   meRouter.use(createMeFinanceBurseryRouter());
+  meRouter.use(createMeRecordsSearchRouter());
   meRouter.use(createMeAcademicsRouter());
   meRouter.use(createMeExamsRouter());
   meRouter.use("/communication/notices", createMeCommunicationNoticesRouter());

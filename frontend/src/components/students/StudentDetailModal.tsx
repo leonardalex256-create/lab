@@ -24,24 +24,33 @@ export type StudentDetailModalProps = {
   studentId: number | null;
   initialEditing?: boolean;
   focusSectionField?: boolean;
+  lockClassField?: boolean;
   streamOptions?: string[] | null;
   onClose: () => void;
   onChanged: () => void | Promise<void>;
   onSaved?: (name: string) => void;
+  /** User permissions array — when provided, gates edit/delete/photo. Omit for admin (all allowed). */
+  permissions?: string[];
 };
 
 export function StudentDetailModal({
   studentId,
   initialEditing = false,
   focusSectionField = false,
+  lockClassField = false,
   streamOptions = null,
   onClose,
   onChanged,
   onSaved,
+  permissions,
 }: StudentDetailModalProps) {
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
   const isDarkUi = resolvedTheme === "dark" || resolvedTheme === "tinted-dark";
+
+  // Permission helpers — undefined means "all allowed" (admin)
+  const canEdit = !permissions || permissions.includes("students_edit");
+  const canDelete = !permissions || permissions.includes("students_delete");
 
   const [row, setRow] = useState<StudentApiRow | null>(null);
   const [editing, setEditing] = useState(initialEditing);
@@ -336,6 +345,7 @@ export function StudentDetailModal({
                           className="h-full w-full object-cover"
                         />
                      </div>
+                     {canEdit && (
                      <label className="absolute -bottom-2 -right-2 h-8 w-8 bg-teal-600 rounded-xl flex items-center justify-center text-white cursor-pointer shadow-lg hover:scale-110 transition-transform">
                         <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
@@ -343,6 +353,7 @@ export function StudentDetailModal({
                         </svg>
                         <input type="file" className="hidden" accept="image/*" onChange={(e) => void handlePhoto(e.target.files?.[0] ?? null)} />
                      </label>
+                     )}
                    </div>
                    <div className="flex-1 min-w-0">
                       <span className={`inline-block px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest mb-2 ${isDarkUi ? "bg-slate-900 text-teal-400" : "bg-teal-100 text-teal-700"}`}>
@@ -395,7 +406,12 @@ export function StudentDetailModal({
                     </div>
                     <div className="space-y-1.5">
                       <label className={`text-[10px] font-black uppercase tracking-widest ${isDarkUi ? "text-slate-500" : "text-slate-400"}`}>{t("students.form.classroom")}</label>
-                      <select className={fieldClass} value={classRoomId} onChange={(e) => setClassRoomId(e.target.value)}>
+                      <select
+                        className={fieldClass}
+                        value={classRoomId}
+                        onChange={(e) => setClassRoomId(e.target.value)}
+                        disabled={lockClassField}
+                      >
                         <option value="">Unassigned</option>
                         {sortedRooms.map((r) => <option key={r.id} value={String(r.id)}>{r.name} ({r.academicYear})</option>)}
                       </select>
@@ -467,18 +483,22 @@ export function StudentDetailModal({
           <div className={`px-8 py-6 border-t shrink-0 flex items-center gap-4 ${isDarkUi ? "border-slate-800 bg-slate-900/50" : "border-slate-100 bg-slate-50/50"}`}>
              {!editing ? (
                <>
+                 {canEdit && (
                  <button
                     onClick={() => setEditing(true)}
                     className="flex-1 rounded-2xl bg-gradient-to-r from-teal-600 to-emerald-600 py-3 text-sm font-black text-white shadow-lg shadow-teal-600/20 transition-all hover:-translate-y-1"
                   >
                     Edit Profile
                   </button>
+                 )}
+                 {canDelete && (
                   <button
                     onClick={() => void handleDelete()}
                     className={`px-6 py-3 rounded-2xl font-black text-sm transition-all hover:bg-rose-500/10 ${isDarkUi ? "text-rose-500" : "text-rose-600"}`}
                   >
                     Delete
                   </button>
+                 )}
                </>
              ) : (
                <>

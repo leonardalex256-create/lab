@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   deleteFinanceReceipt,
   fetchFinanceReceipt,
@@ -9,7 +9,10 @@ import { fetchStudentStatement } from "../../../api/financeStatements";
 import type { StudentPaymentReceipt, StudentStatementPayload } from "../shared/financeTypes";
 import { StudentReceiptPage } from "./StudentReceiptPage";
 import { StudentStatementPage } from "../statements/StudentStatementPage";
+import { formatCurrencyUGX } from "../shared/financeFormat";
+import { ConfirmModal } from "../shared/ConfirmModal";
 import { useTheme } from "../../../theme/ThemeProvider";
+import { useTermContext } from "../../../context/TermContext";
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -17,11 +20,8 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString("en-UG", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-function formatCurrency(amount: number): string {
-  return `${Math.round(Number(amount) || 0).toLocaleString("en-UG")} UGX`;
-}
-
-export function ReceiptsHistoryPage() {
+export function ReceiptsHistoryPage({ generatedByName }: { generatedByName?: string }) {
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
   const { resolvedTheme } = useTheme();
   const isDarkUi = resolvedTheme === "dark" || resolvedTheme === "tinted-dark";
 
@@ -32,25 +32,57 @@ export function ReceiptsHistoryPage() {
   const [activeStatement, setActiveStatement] = useState<StudentStatementPayload | null>(null);
   const [openingId, setOpeningId] = useState<number | null>(null);
   const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const PAGE_SIZE = 50;
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    description: string;
+    variant: "danger" | "warning" | "info";
+    onConfirm: () => void;
+  } | null>(null);
 
-  const loadRows = async () => {
+  const loadRows = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const items = await fetchFinanceReceipts(300);
-      setRows(items);
+      const res = await fetchFinanceReceipts(PAGE_SIZE, {
+        offset: (page - 1) * PAGE_SIZE,
+        term: viewingTerm,
+        academicYear: viewingAcademicYear,
+      });
+      setRows(res.items);
+      setTotalCount(res.total);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load receipts.");
     } finally {
       setLoading(false);
     }
-  };
+  }, [PAGE_SIZE, page, viewingTerm, viewingAcademicYear]);
 
   useEffect(() => {
     void loadRows();
-  }, []);
+  }, [loadRows]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [viewingTerm, viewingAcademicYear]);
+
+  const filteredRows = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((row) => {
+      return (
+        row.studentName.toLowerCase().includes(q) ||
+        row.receiptNo.toLowerCase().includes(q) ||
+        (row.className ?? "").toLowerCase().includes(q)
+      );
+    });
+  }, [rows, searchQuery]);
 
   const hasRows = useMemo(() => rows.length > 0, [rows.length]);
+  const totalPages = Math.max(1, Math.ceil((totalCount || 0) / PAGE_SIZE));
 
   const openReceipt = async (id: number, shouldPrint = false) => {
     setOpenMenuId(null);
@@ -70,7 +102,7 @@ export function ReceiptsHistoryPage() {
     setOpenMenuId(null);
     setOpeningId(row.id);
     try {
-      const statement = await fetchStudentStatement(row.studentId, row.term);
+      const statement = await fetchStudentStatement(row.studentId, row.term, row.academicYear);
       setActiveStatement(statement);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not open statement.");
@@ -81,19 +113,25 @@ export function ReceiptsHistoryPage() {
 
   const deleteReceiptRow = async (row: FinanceReceiptListItem) => {
     setOpenMenuId(null);
-    const ok = window.confirm(
-      `Delete receipt ${row.receiptNo} for ${row.studentName}? This will remove the saved payment record.`,
-    );
-    if (!ok) return;
-    setOpeningId(row.id);
-    try {
-      await deleteFinanceReceipt(row.id);
-      await loadRows();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not delete receipt.");
-    } finally {
-      setOpeningId(null);
-    }
+    setConfirmModal({
+      title: "Delete receipt",
+      description: `Delete receipt ${row.receiptNo} for ${row.studentName}? This will remove the saved payment record.`,
+      variant: "danger",
+      onConfirm: () => {
+        setConfirmModal(null);
+        void (async () => {
+          setOpeningId(row.id);
+          try {
+            await deleteFinanceReceipt(row.id);
+            await loadRows();
+          } catch (e) {
+            setError(e instanceof Error ? e.message : "Could not delete receipt.");
+          } finally {
+            setOpeningId(null);
+          }
+        })();
+      },
+    });
   };
 
   if (activeReceipt) {
@@ -123,7 +161,15 @@ export function ReceiptsHistoryPage() {
             Print Receipt
           </button>
         </div>
-        <StudentReceiptPage receipt={activeReceipt} />
+        <StudentReceiptPage
+          receipt={{
+            ...activeReceipt,
+            generatedByName:
+              (activeReceipt.generatedByName ??
+              generatedByName?.trim()) ||
+              "Account User",
+          }}
+        />
       </div>
     );
   }
@@ -167,9 +213,22 @@ export function ReceiptsHistoryPage() {
       <div className={`border-b px-8 py-6 flex items-center justify-between ${isDarkUi ? "border-slate-800" : "border-slate-50"}`}>
         <div>
           <h3 className={`text-lg font-black ${isDarkUi ? "text-white" : "text-[#0c2340]"}`}>Payment History Registry</h3>
-          <p className="mt-1 text-xs font-medium text-slate-500 uppercase tracking-widest">Digital Audit Trail</p>
+          <p className="mt-1 text-xs font-medium text-slate-500 uppercase tracking-widest">
+            Digital Audit Trail · Showing {filteredRows.length} of {rows.length} receipts
+          </p>
         </div>
-        <div className="h-10 w-10 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center text-xl">🧾</div>
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">🔍</span>
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search receipts..."
+              className="neo-inset-field w-full max-w-sm rounded-xl pl-10 pr-4 py-2 text-sm focus:ring-2 focus:ring-[#5a8faf]/50"
+            />
+          </div>
+          <div className="h-10 w-10 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center text-xl">🧾</div>
+        </div>
       </div>
 
       {loading ? (
@@ -201,7 +260,7 @@ export function ReceiptsHistoryPage() {
               </tr>
             </thead>
             <tbody className={`divide-y ${isDarkUi ? "divide-slate-800" : "divide-slate-50"}`}>
-              {rows.map((row) => {
+              {filteredRows.map((row) => {
                 const busy = openingId === row.id;
                 return (
                   <tr key={row.id} className="group transition-colors hover:bg-slate-50/50">
@@ -215,13 +274,20 @@ export function ReceiptsHistoryPage() {
                       </div>
                     </td>
                     <td className={`px-8 py-5 text-sm font-black tabular-nums text-right ${isDarkUi ? "text-slate-200" : "text-[#0c2340]"}`}>
-                      {formatCurrency(row.amountPaid)}
+                      {formatCurrencyUGX(row.amountPaid)}
                     </td>
                     <td className="px-8 py-5">
-                       <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-700">
+                      {row.isVoided === true ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-rose-700">
+                          <span className="h-1 w-1 rounded-full bg-rose-500" />
+                          Voided
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-700">
                           <span className="h-1 w-1 rounded-full bg-emerald-500" />
                           Settled
-                       </span>
+                        </span>
+                      )}
                     </td>
                     <td className="px-8 py-5 text-xs font-semibold text-slate-500 tabular-nums">
                       {formatDate(row.issuedAt)}
@@ -265,6 +331,42 @@ export function ReceiptsHistoryPage() {
           </table>
         </div>
       )}
+
+      {!loading && !error && hasRows ? (
+        <div className="flex items-center justify-between px-8 py-4 border-t border-slate-50">
+          <div className="text-xs font-bold text-slate-400">
+            Page {page} of {totalPages} · {totalCount} receipts total
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={page === 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="rounded-xl border border-slate-100 bg-white px-5 py-2 text-xs font-black text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              disabled={page * PAGE_SIZE >= totalCount}
+              onClick={() => setPage((p) => p + 1)}
+              className="rounded-xl border border-slate-100 bg-white px-5 py-2 text-xs font-black text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <ConfirmModal
+        open={!!confirmModal}
+        title={confirmModal?.title ?? ""}
+        description={confirmModal?.description ?? ""}
+        variant={confirmModal?.variant ?? "danger"}
+        loading={openingId != null}
+        onConfirm={confirmModal?.onConfirm ?? (() => undefined)}
+        onCancel={() => setConfirmModal(null)}
+      />
     </div>
   );
 }

@@ -438,7 +438,7 @@ export function PasswordResetPage({ onBack, onSuccess }: PasswordResetPageProps)
                     autoComplete="email"
                     placeholder="you@school.edu"
                     value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => setEmail(e.target.value.toLowerCase())}
                     disabled={loading}
                     className="min-w-0 flex-1 bg-transparent text-[15px] text-[#2d3436] outline-none placeholder:text-[#636e72]/70 disabled:opacity-60"
                   />

@@ -5,7 +5,9 @@ type ReceiptApiRow = {
   id: number;
   receiptNo: string;
   issuedAt: string;
+  generatedByName?: string;
   term: string;
+  academicYear?: string;
   paymentMethod: string;
   paidBy: string;
   amountPaid: number;
@@ -28,6 +30,7 @@ function mapReceipt(x: ReceiptApiRow): StudentPaymentReceipt {
     id: x.id,
     receiptNo: x.receiptNo,
     issuedAt: new Date(x.issuedAt),
+    generatedByName: typeof x.generatedByName === "string" ? x.generatedByName : undefined,
     term: x.term,
     paymentMethod: x.paymentMethod,
     paidBy: x.paidBy,
@@ -117,6 +120,7 @@ export type FinanceReceiptListItem = {
   id: number;
   receiptNo: string;
   term: string;
+  academicYear: string;
   amountPaid: number;
   paymentMethod: string;
   paidBy: string;
@@ -124,10 +128,19 @@ export type FinanceReceiptListItem = {
   issuedAt: string;
   studentName: string;
   className: string | null;
+  isVoided?: boolean;
 };
 
-export async function fetchFinanceReceipts(limit = 200): Promise<FinanceReceiptListItem[]> {
-  const res = await fetch(apiUrl(`/api/me/finance/receipts?limit=${encodeURIComponent(String(limit))}`), {
+export async function fetchFinanceReceipts(
+  limit = 200,
+  opts?: { term?: string; academicYear?: string; studentId?: number; offset?: number },
+): Promise<{ items: FinanceReceiptListItem[]; total: number }> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (opts?.term) q.set("term", opts.term);
+  if (opts?.academicYear) q.set("academicYear", opts.academicYear);
+  if (opts?.studentId != null) q.set("studentId", String(opts.studentId));
+  if (opts?.offset != null) q.set("offset", String(opts.offset));
+  const res = await fetch(apiUrl(`/api/me/finance/receipts?${q.toString()}`), {
     headers: { ...authHeaders() },
   });
   if (res.status === 401) throw new Error("Unauthorized");
@@ -135,8 +148,8 @@ export async function fetchFinanceReceipts(limit = 200): Promise<FinanceReceiptL
     const err = await readJson<{ error?: string }>(res).catch(() => null);
     throw new Error(err?.error ?? "Request failed");
   }
-  const data = await readJson<{ items: FinanceReceiptListItem[] }>(res);
-  return data.items ?? [];
+  const data = await readJson<{ items: FinanceReceiptListItem[]; total?: number }>(res);
+  return { items: data.items ?? [], total: Number(data.total) || 0 };
 }
 
 export async function deleteFinanceReceipt(id: number): Promise<void> {

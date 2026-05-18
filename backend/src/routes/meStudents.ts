@@ -17,6 +17,8 @@ import {
 import { parseQueryToIsoDate } from "../formatting/localeDate.js";
 import { studentToApiRow } from "../formatting/studentRow.js";
 import { validateWithSchema } from "../lib/validateBody.js";
+import { scheduleFeeComplianceCheckAndNotify } from "../services/feeAssignmentCompliance.js";
+import { loadOfficialSchoolTermYear } from "../lib/officialSchoolTermYear.js";
 import {
   ClassCategory,
   ClassRoom,
@@ -283,8 +285,9 @@ async function createStudentRecord(fields: {
     throw new Error("Student model is not attached to a Sequelize instance");
   }
 
-  return sequelize.transaction(async (t) => {
-    const created = await Student.create(
+  const { academicYear: assignYear } = await loadOfficialSchoolTermYear();
+  const created = await sequelize.transaction(async (t) => {
+    const createdInner = await Student.create(
       {
         admissionNumber: tempAdmissionKey(),
         firstName,
@@ -328,7 +331,7 @@ async function createStudentRecord(fields: {
       });
       className = cls?.name ?? null;
     }
-    await created.update(
+    await createdInner.update(
       {
         admissionNumber,
       },
@@ -355,11 +358,12 @@ async function createStudentRecord(fields: {
         const matchedStructure =
           termStructures.find((row) => row.boardingStatus === feeStatus) ?? termStructures[0] ?? null;
         const autoAmount = matchedStructure ? Number(matchedStructure.amountDueUgx) || 0 : 0;
+        if (autoAmount <= 0) continue;
         const autoNotes = matchedStructure
           ? `Auto-assigned on student creation (${matchedStructure.boardingStatus}).`
-          : "Auto-assigned on student creation. Update amount after configuring fee structure.";
+          : "Auto-assigned on student creation.";
         await StudentFeeAssignment.findOrCreate({
-          where: { studentId: created.id, term: assignmentTerm },
+          where: { studentId: createdInner.id, term: assignmentTerm, academicYear: assignYear },
           defaults: {
             amountDueUgx: autoAmount,
             notes: autoNotes,
@@ -367,19 +371,12 @@ async function createStudentRecord(fields: {
           transaction: t,
         });
       }
-    } else {
-      await StudentFeeAssignment.findOrCreate({
-        where: { studentId: created.id, term: "Term 1" },
-        defaults: {
-          amountDueUgx: 0,
-          notes: "Auto-assigned on student creation. Update amount after configuring fee structure.",
-        },
-        transaction: t,
-      });
     }
 
-    return created;
+    return createdInner;
   });
+  scheduleFeeComplianceCheckAndNotify();
+  return created;
 }
 
 function normalizeCsvHeader(h: string): string {
@@ -445,6 +442,38 @@ function parseTransferReason(v: unknown): "relocation" | "discipline" | "better_
 
 export function createMeStudentsRouter() {
   const r = Router();
+
+  // ── GET /students/recent-admissions ──────────────────────────────────────
+  // Used by RegistrarOverview. Term/year are accepted for future filtering.
+  r.get("/students/recent-admissions", async (req, res) => {
+    try {
+      const sequelize = (await import("../models/index.js")).User.sequelize;
+      if (!sequelize) return res.status(500).json({ error: "DB not initialized" });
+
+      const limit = Math.min(25, Math.max(1, Number(req.query.limit ?? 10)));
+
+      const [rows] = await sequelize.query(
+        `SELECT
+           s.id AS studentId,
+           s.admission_number AS admissionNumber,
+           CONCAT(s.first_name, ' ', s.last_name) AS studentName,
+           COALESCE(c.name, s.section_name) AS className,
+           s.section_name AS sectionName,
+           DATE_FORMAT(COALESCE(s.created_at, NOW()), '%d/%m/%Y') AS admittedAtLabel,
+           CASE WHEN LOWER(COALESCE(s.status,'active'))='active' THEN 'Active' ELSE 'Pending' END AS status
+         FROM students s
+         LEFT JOIN classrooms c ON c.id = s.class_room_id
+         ORDER BY s.created_at DESC
+         LIMIT :limit`,
+        { replacements: { limit } },
+      );
+
+      return res.json({ items: rows });
+    } catch (err) {
+      console.error("[students/recent-admissions]", err);
+      return res.status(500).json({ error: "Failed to load recent admissions" });
+    }
+  });
   const uploadDir = studentUploadDir();
   const reportUploadDir = transferReportUploadDir();
 
@@ -538,7 +567,39 @@ export function createMeStudentsRouter() {
   });
 
   r.post("/classrooms", async (req, res) => {
-    return res.status(403).json({ error: "Creating classes is disabled." });
+    try {
+      const body = req.body as Record<string, unknown>;
+      const name = trimStr(body.name, 120);
+      if (!name) return res.status(400).json({ error: "name is required" });
+      const description = trimStr(body.description, 255);
+      const categoryId = parseOptionalId(body.categoryId);
+      if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
+      const category = await ClassCategory.findByPk(categoryId);
+      if (!category) return res.status(400).json({ error: "Invalid categoryId" });
+      const yearRaw = trimStr(body.academicYear, 20);
+      const academicYear = yearRaw ?? String(new Date().getFullYear());
+      const row = await ClassRoom.create({
+        name,
+        categoryId,
+        ...(description !== null ? { description } : {}),
+        isActive: true,
+        academicYear,
+      });
+      return res.status(201).json({
+        item: {
+          id: row.id,
+          name: row.name,
+          categoryId: (row.get("category_id") as number | null) ?? null,
+          categoryName: category.name,
+          description: (row.get("description") as string | null) ?? null,
+          isActive: ((row.get("is_active") as number | boolean | null) ?? 1) === 1 || row.get("is_active") === true,
+          academicYear: row.academicYear,
+        },
+      });
+    } catch (err) {
+      console.error(err);
+      return res.status(503).json({ error: "Database unavailable" });
+    }
   });
 
   r.patch("/classrooms/:id(\\d+)", async (req, res) => {
@@ -1101,11 +1162,18 @@ export function createMeStudentsRouter() {
           ["last_name", "ASC"],
           ["first_name", "ASC"],
         ];
+      } else if (sortKey === "boarding") {
+        order = [
+          ["boarding_status", sortDir],
+          ["last_name", "ASC"],
+          ["first_name", "ASC"],
+        ];
       } else {
         order = [["created_at", sortDir]];
       }
 
-      let where: WhereOptions<Student> = {};
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const andParts: any[] = [];
       if (qRaw.length > 0) {
         const simple = sanitizeLikeFragment(qRaw);
         const isoDob = parseQueryToIsoDate(qRaw);
@@ -1113,19 +1181,16 @@ export function createMeStudentsRouter() {
         const or: any[] = [];
         if (simple.length > 0) {
           const pattern = { [Op.like]: `%${simple}%` };
+          const prefixPattern = { [Op.like]: `${simple}%` };
+          const exactPattern = { [Op.eq]: simple };
           or.push(
-            { admission_number: pattern },
+            { admission_number: exactPattern },
+            { admission_number: prefixPattern },
             { first_name: pattern },
             { middle_name: pattern },
             { last_name: pattern },
             { parent_email: pattern },
             { section_name: pattern },
-            { nationality: pattern },
-            { district: pattern },
-            { parent_full_name: pattern },
-            { parent_phone: pattern },
-            { parent_address: pattern },
-            { country_code: pattern },
             Sequelize.where(
               Sequelize.fn(
                 "CONCAT",
@@ -1144,19 +1209,33 @@ export function createMeStudentsRouter() {
         if (or.length === 0) {
           return res.json({ items: [], total: 0 });
         }
-        where = { [Op.or]: or };
+        andParts.push({ [Op.or]: or });
       }
 
-      const { count, rows } = await Student.findAndCountAll({
-        where,
-        include: [{ model: ClassRoom, as: "classRoom", required: false }],
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        order: order as any,
-        limit,
-        offset,
-      });
+      const classRoomFilter = parsedQuery.data.classRoomId;
+      if (classRoomFilter != null) {
+        andParts.push({ classRoomId: classRoomFilter });
+      }
+      const boardingFilter = parsedQuery.data.boardingStatus;
+      if (boardingFilter) {
+        andParts.push({ boardingStatus: boardingFilter });
+      }
 
-      return res.json({ items: rows.map(studentToApiRow), total: count });
+      let where: WhereOptions<Student> =
+        andParts.length === 0 ? {} : andParts.length === 1 ? andParts[0]! : { [Op.and]: andParts };
+
+      const [rows, total] = await Promise.all([
+        Student.findAll({
+          where,
+          include: [{ model: ClassRoom, as: "classRoom", required: false }],
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          order: order as any,
+          limit,
+          offset,
+        }),
+        Student.count({ where }),
+      ]);
+      return res.json({ items: rows.map(studentToApiRow), total });
     } catch (err) {
       console.error(err);
       return res.status(503).json({ error: "Database unavailable" });
@@ -1204,8 +1283,16 @@ export function createMeStudentsRouter() {
         return res.status(400).json({ error: "amountPaid must be greater than zero" });
       }
 
+      const official = await loadOfficialSchoolTermYear();
+      if (term !== official.term) {
+        return res.status(400).json({
+          error: `Receipts must use the school's current term (${official.term}).`,
+        });
+      }
+      const academicYear = official.academicYear;
+
       const sumRaw = await StudentFeeReceipt.sum("amount_paid_ugx", {
-        where: { studentId, term },
+        where: { studentId, term, academicYear },
       });
       const previousPaidUgx = Math.max(Number(sumRaw ?? 0) || 0, 0);
       const totalFeesDueUgx = previousPaidUgx + amountPaidUgx;
@@ -1221,6 +1308,7 @@ export function createMeStudentsRouter() {
           {
             studentId,
             receiptNo: "PENDING",
+            academicYear,
             term,
             paymentMethod,
             paidBy,

@@ -36,6 +36,8 @@ export type ManagedUser = {
   isActive: boolean;
   isDeleted: boolean;
   createdAt: string;
+  /** Classes this user may access (user_class_authorizations). Omitted on older API responses. */
+  classRoomIds?: number[];
 };
 
 export async function fetchAccount(): Promise<AccountInfo> {
@@ -62,6 +64,8 @@ export async function createManagedUser(body: {
   role: string;
   password: string;
   confirmPassword: string;
+  classRoomIds?: number[];
+  staffMemberId?: number | null;
 }): Promise<ManagedUser> {
   const res = await fetch(apiUrl("/api/me/users"), {
     method: "POST",
@@ -118,6 +122,23 @@ export async function updateManagedUserStatus(
     method: "PATCH",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ active }),
+  });
+  if (res.status === 401) throw new Error("Unauthorized");
+  if (!res.ok) {
+    throw new Error(await errorMessageFromResponse(res));
+  }
+  const data = await readJson<{ user: ManagedUser }>(res);
+  return data.user;
+}
+
+export async function updateManagedUserClassRooms(
+  userId: number,
+  classRoomIds: number[],
+): Promise<ManagedUser> {
+  const res = await fetch(apiUrl(`/api/me/users/${userId}/class-rooms`), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ classRoomIds }),
   });
   if (res.status === 401) throw new Error("Unauthorized");
   if (!res.ok) {

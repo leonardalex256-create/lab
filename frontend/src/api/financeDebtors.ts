@@ -7,9 +7,9 @@ async function readJson<T>(res: Response): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-export async function fetchDebtorsReport(term?: string): Promise<DebtorsPayload> {
-  const query = term ? `?term=${encodeURIComponent(term)}` : "";
-  const res = await fetch(apiUrl(`/api/me/finance/reports/debtors${query}`), {
+export async function fetchDebtorsReport(term: string, academicYear: string): Promise<DebtorsPayload> {
+  const q = new URLSearchParams({ term, academicYear });
+  const res = await fetch(apiUrl(`/api/me/finance/reports/debtors?${q.toString()}`), {
     headers: { ...authHeaders() },
   });
   if (res.status === 401) throw new Error("Unauthorized");
