@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchCountries,
   fetchDistricts,
@@ -96,6 +96,7 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
+  const lastAutoNationalityRef = useRef<string | null>(null);
   const activeRooms = useMemo(
     () => rooms.filter((r) => r.isActive !== false),
     [rooms],
@@ -170,6 +171,98 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load once
   }, []);
+
+  const sortedNationalities = useMemo(() => {
+    return [...nationalities].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: "base" }),
+    );
+  }, [nationalities]);
+
+  const sortedCountries = useMemo(() => {
+    return [...countries].sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+    );
+  }, [countries]);
+
+  const countryCodeToName = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const c of countries) {
+      map.set(c.code.trim().toUpperCase(), c.name);
+    }
+    return map;
+  }, [countries]);
+
+  const nationalityLookup = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const n of nationalities) {
+      const key = n.trim().toLowerCase();
+      if (!key) continue;
+      if (!map.has(key)) map.set(key, n);
+    }
+    return map;
+  }, [nationalities]);
+
+  useEffect(() => {
+    const code = countryCode.trim().toUpperCase();
+    if (!code) return;
+    const countryName = countryCodeToName.get(code);
+    if (!countryName) return;
+
+    // Minimal curated country -> nationality mapping (demonym).
+    // We only auto-fill when the resulting nationality exists in the loaded list.
+    const demonymByCountry: Record<string, string> = {
+      uganda: "Ugandan",
+      kenya: "Kenyan",
+      tanzania: "Tanzanian",
+      rwanda: "Rwandan",
+      burundi: "Burundian",
+      "south sudan": "South Sudanese",
+      sudan: "Sudanese",
+      ethiopia: "Ethiopian",
+      somalia: "Somali",
+      eritrea: "Eritrean",
+      nigeria: "Nigerian",
+      ghana: "Ghanaian",
+      "south africa": "South African",
+      zambia: "Zambian",
+      zimbabwe: "Zimbabwean",
+      malawi: "Malawian",
+      "united kingdom": "British",
+      uk: "British",
+      "united states": "American",
+      "united states of america": "American",
+      usa: "American",
+      india: "Indian",
+      china: "Chinese",
+      france: "French",
+      germany: "German",
+      egypt: "Egyptian",
+      algeria: "Algerian",
+      angola: "Angolan",
+      afghanistan: "Afghan",
+      bangladesh: "Bangladeshi",
+      cameroon: "Cameroonian",
+      "congo (drc)": "Congolese (DRC)",
+      "democratic republic of the congo": "Congolese (DRC)",
+    };
+
+    const normalizedCountry = countryName.trim().toLowerCase();
+    const proposed = demonymByCountry[normalizedCountry];
+    if (!proposed) return;
+    const exact = nationalityLookup.get(proposed.trim().toLowerCase());
+    if (!exact) return;
+
+    // Only auto-fill if user hasn't intentionally chosen a different value.
+    // If current nationality is empty/unset OR was previously auto-filled, we can replace it.
+    const current = nationality.trim();
+    const lastAuto = (lastAutoNationalityRef.current ?? "").trim();
+    const canAutoReplace =
+      !current || current === t("students.form.nationalityUnset") || current === lastAuto;
+    if (!canAutoReplace) return;
+
+    lastAutoNationalityRef.current = exact;
+    setNationality(exact);
+  }, [countryCode, countryCodeToName, nationalityLookup, nationality, t]);
 
   useEffect(() => {
     const code = countryCode.trim();
@@ -333,6 +426,7 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
     setClassRoomId("");
     setSections([]);
     setNationality("");
+    lastAutoNationalityRef.current = null;
     setCountryCode("");
     setDistrict("");
     setDistricts([]);
@@ -545,16 +639,24 @@ export function NewAdmissionForm({ onCreated }: NewAdmissionFormProps) {
             </label>
             <label className="block">
               <span className="block text-xs font-semibold text-slate-600 mb-1.5">{t("students.form.nationality")} <span className="text-rose-500">*</span></span>
-              <select required value={nationality} onChange={(e) => setNationality(e.target.value)} className={fieldClass}>
+              <select
+                required
+                value={nationality}
+                onChange={(e) => {
+                  lastAutoNationalityRef.current = null;
+                  setNationality(e.target.value);
+                }}
+                className={fieldClass}
+              >
                 <option value="">{t("students.form.nationalityUnset")}</option>
-                {nationalities.map((n) => (<option key={n} value={n}>{n}</option>))}
+                {sortedNationalities.map((n) => (<option key={n} value={n}>{n}</option>))}
               </select>
             </label>
             <label className="block">
               <span className="block text-xs font-semibold text-slate-600 mb-1.5">{t("students.form.country")} <span className="text-rose-500">*</span></span>
               <select required value={countryCode} onChange={(e) => { setCountryCode(e.target.value); setDistrict(""); }} className={fieldClass}>
                 <option value="">{t("students.form.countryUnset")}</option>
-                {countries.map((c) => (<option key={c.code} value={c.code}>{c.name}</option>))}
+                {sortedCountries.map((c) => (<option key={c.code} value={c.code}>{c.name}</option>))}
               </select>
             </label>
             <label className="block">

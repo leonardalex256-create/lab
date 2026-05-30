@@ -4,8 +4,6 @@ import { useTheme, type Density, type ThemePreference, type FontPreference } fro
 const optionBtn =
   "group relative overflow-hidden rounded-2xl border-2 p-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--sky)]/60";
 
-const densityBtn =
-  "group relative overflow-hidden rounded-2xl border-2 p-4 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--sky)]/60";
 
 const themeOptions: Array<{ id: ThemePreference; labelKey: string }> = [
   { id: "light", labelKey: "settings.modes.themeLight" },
@@ -118,7 +116,7 @@ export function SettingsModesPanel() {
                 key={opt.id}
                 type="button"
                 onClick={() => setDensity(opt.id)}
-                className={`${densityBtn} ${
+                className={`${optionBtn} ${
                   density === opt.id
                     ? isDarkUi
                       ? "border-[#60a5fa] bg-[#0f172a] text-[#e2e8f0] shadow-[0_8px_20px_rgba(59,130,246,0.25)]"
@@ -161,7 +159,7 @@ export function SettingsModesPanel() {
                 <div className="flex flex-col">
                   <span className="text-base font-bold">{t(opt.labelKey)}</span>
                   <span className="mt-1 text-[10px] opacity-70">
-                    The quick brown fox jumps over the lazy dog
+                    {t("settings.modes.fontPreview")}
                   </span>
                 </div>
               </button>

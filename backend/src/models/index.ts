@@ -7,6 +7,23 @@ import {
   where,
 } from "sequelize";
 import type { Config } from "../config.js";
+import {
+  initFeeConfigModels,
+  associateFeeConfigModels,
+  StudentStatus,
+  FeeCategory,
+  FeeCategoryStatus,
+  FeeRule,
+  StudentFeeLineItem,
+} from "./feeConfigModels.js";
+
+export {
+  StudentStatus,
+  FeeCategory,
+  FeeCategoryStatus,
+  FeeRule,
+  StudentFeeLineItem,
+} from "./feeConfigModels.js";
 
 export class User extends Model {
   declare id: number;
@@ -97,6 +114,8 @@ export class Student extends Model {
   declare religion: string | null;
   declare specialNeeds: string | null;
   declare boardingStatus: string | null;
+  declare studentStatusId: number | null;
+  declare registrationDraftJson: string | null;
   declare residenceAddress: string | null;
   declare medicalInfo: string | null;
   declare emergencyContactName: string | null;
@@ -752,6 +771,16 @@ export function setupDatabase(config: Config): Sequelize {
         allowNull: true,
         field: "boarding_status",
       },
+      studentStatusId: {
+        type: DataTypes.INTEGER.UNSIGNED,
+        allowNull: true,
+        field: "student_status_id",
+      },
+      registrationDraftJson: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        field: "registration_draft_json",
+      },
       residenceAddress: {
         type: DataTypes.STRING(255),
         allowNull: true,
@@ -812,6 +841,7 @@ export function setupDatabase(config: Config): Sequelize {
         { fields: ["class_room_id"] },
         { fields: ["first_name", "last_name"] },
         { fields: ["parent_email"] },
+        { fields: ["student_status_id"] },
       ],
 
     },
@@ -2427,6 +2457,9 @@ export function setupDatabase(config: Config): Sequelize {
     as: "payrollEntries",
     constraints: false,
   });
+
+  initFeeConfigModels(sequelize);
+  associateFeeConfigModels(Student);
 
   return sequelize;
 }

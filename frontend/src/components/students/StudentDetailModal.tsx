@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   fetchCountries,
   fetchDistricts,
@@ -15,8 +15,13 @@ import {
   type ClassRoomOption,
   type StudentApiRow,
 } from "../../api/students";
+import { useStudentStatuses } from "../../hooks/useStudentStatuses";
+import { useTermContext } from "../../context/TermContext";
+import { statusLabelFromRow } from "../../utils/studentStatusDisplay";
 import { useI18n } from "../../i18n/I18nProvider";
 import { AuthenticatedStudentPhoto } from "./AuthenticatedStudentPhoto";
+import { StudentStatusBadge } from "../statuses/StudentStatusBadge";
+import { StudentStatusChangeDialog, type StatusFeeRecalcScope } from "./StudentStatusChangeDialog";
 
 import { useTheme } from "../../theme/ThemeProvider";
 
@@ -45,6 +50,7 @@ export function StudentDetailModal({
   permissions,
 }: StudentDetailModalProps) {
   const { t } = useI18n();
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
   const { resolvedTheme } = useTheme();
   const isDarkUi = resolvedTheme === "dark" || resolvedTheme === "tinted-dark";
 
@@ -59,6 +65,10 @@ export function StudentDetailModal({
   const [error, setError] = useState<string | null>(null);
   const [districtsLoading, setDistrictsLoading] = useState(false);
   const [confirmSaveOpen, setConfirmSaveOpen] = useState(false);
+  const [statusChangeOpen, setStatusChangeOpen] = useState(false);
+  const { statuses: studentStatuses } = useStudentStatuses();
+  const [studentStatusId, setStudentStatusId] = useState("");
+  const [originalStudentStatusId, setOriginalStudentStatusId] = useState<number | null>(null);
 
   const [firstName, setFirstName] = useState("");
   const [middleName, setMiddleName] = useState("");
@@ -115,6 +125,7 @@ export function StudentDetailModal({
     if (studentId) {
       setLoading(true);
       setError(null);
+      setEditing(initialEditing);
       void Promise.all([
         fetchStudent(studentId),
         fetchNationalities(),
@@ -123,6 +134,8 @@ export function StudentDetailModal({
         fetchClassSections(),
       ]).then(([s, nats, counts, rooms, secs]) => {
         setRow(s);
+        setStudentStatusId(s.studentStatusId != null ? String(s.studentStatusId) : "");
+        setOriginalStudentStatusId(s.studentStatusId);
         setFirstName(s.firstName);
         setMiddleName(s.middleName ?? "");
         setLastName(s.lastName);
@@ -149,7 +162,7 @@ export function StudentDetailModal({
         setLoading(false);
       });
     }
-  }, [studentId]);
+  }, [studentId, initialEditing]);
 
   useEffect(() => {
     if (countryCode) {
@@ -209,11 +222,43 @@ export function StudentDetailModal({
     setEmergencyContactPhone(s.emergencyContactPhone ?? "");
     setGuardianName(s.guardianName ?? "");
     setGuardianPhone(s.guardianPhone ?? "");
+    setStudentStatusId(s.studentStatusId != null ? String(s.studentStatusId) : "");
+    setOriginalStudentStatusId(s.studentStatusId);
     await onChanged();
     return s;
   };
 
-  const handleSave = async () => {
+  const selectedStatus = useMemo(
+    () => studentStatuses.find((s) => String(s.id) === studentStatusId),
+    [studentStatuses, studentStatusId],
+  );
+
+  const statusChanged = useMemo(() => {
+    const next =
+      studentStatusId.trim() === "" ? null : Number.parseInt(studentStatusId, 10);
+    if (next != null && !Number.isFinite(next)) return false;
+    return next !== originalStudentStatusId;
+  }, [studentStatusId, originalStudentStatusId]);
+
+  const termLabel = `${viewingTerm} (${viewingAcademicYear})`;
+
+  function requestSave() {
+    setError(null);
+    if (studentStatuses.length > 0 && !studentStatusId.trim()) {
+      setError(t("students.modal.statusRequired"));
+      return;
+    }
+    if (statusChanged) {
+      setConfirmSaveOpen(false);
+      setStatusChangeOpen(true);
+      return;
+    }
+    setStatusChangeOpen(false);
+    setConfirmSaveOpen(true);
+  }
+
+  const handleSave = async (statusFeeRecalcScope?: StatusFeeRecalcScope) => {
+    if (studentId == null) return;
     setSaving(true);
     setError(null);
     try {
@@ -221,6 +266,15 @@ export function StudentDetailModal({
         classRoomId.trim() === "" ? null : Number.parseInt(classRoomId, 10);
       const cc = countryCode.trim();
       const dist = district.trim();
+      const statusIdParsed =
+        studentStatusId.trim() === "" ? null : Number.parseInt(studentStatusId, 10);
+      if (studentStatuses.length > 0) {
+        if (statusIdParsed == null || !Number.isFinite(statusIdParsed) || statusIdParsed < 1) {
+          setError(t("students.modal.statusRequired"));
+          setSaving(false);
+          return;
+        }
+      }
       await updateStudent(studentId, {
         firstName: firstName.trim(),
         middleName: middleName.trim() || null,
@@ -238,10 +292,18 @@ export function StudentDetailModal({
         emergencyContactPhone: emergencyContactPhone.trim() || null,
         guardianName: guardianName.trim() || null,
         guardianPhone: guardianPhone.trim() || null,
+        ...(statusIdParsed != null && Number.isFinite(statusIdParsed)
+          ? { studentStatusId: statusIdParsed }
+          : {}),
+        ...(statusChanged
+          ? { statusFeeRecalcScope: statusFeeRecalcScope ?? "current_term" }
+          : {}),
       });
       const saved = await reload();
       setEditing(false);
       setConfirmSaveOpen(false);
+      setStatusChangeOpen(false);
+      setOriginalStudentStatusId(saved.studentStatusId);
       onSaved?.(saved.fullName);
       onClose();
     } catch (e) {
@@ -273,8 +335,26 @@ export function StudentDetailModal({
     }
   };
 
+  const fromStatusRow = studentStatuses.find((s) => s.id === originalStudentStatusId);
+
   return (
     <>
+      <StudentStatusChangeDialog
+        open={statusChangeOpen}
+        fromLabel={
+          fromStatusRow
+            ? statusLabelFromRow(fromStatusRow)
+            : row?.studentStatusName
+              ? `${row.studentStatusName} (${row.studentStatusCode ?? ""})`
+              : t("students.modal.statusNotSet")
+        }
+        toLabel={statusLabelFromRow(selectedStatus, Number(studentStatusId) || null)}
+        termLabel={termLabel}
+        busy={saving}
+        onCancel={() => setStatusChangeOpen(false)}
+        onConfirm={(scope) => void handleSave(scope)}
+      />
+
       {confirmSaveOpen ? (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
            <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-md animate-in fade-in duration-300" onClick={() => setConfirmSaveOpen(false)} />
@@ -371,6 +451,23 @@ export function StudentDetailModal({
                     <DetailRow label={t("students.col.nationality")} value={row.nationality} isDarkUi={isDarkUi} />
                     <DetailRow label={t("students.col.country")} value={row.countryName || row.countryCode} isDarkUi={isDarkUi} />
                     <DetailRow label={t("students.col.district")} value={row.district} isDarkUi={isDarkUi} />
+                    <DetailRow
+                      label={t("students.modal.studentStatus")}
+                      value={
+                        row.studentStatusCode || row.studentStatusName ? (
+                          <StudentStatusBadge
+                            code={row.studentStatusCode}
+                            name={row.studentStatusName}
+                            colorHex={
+                              studentStatuses.find((s) => s.id === row.studentStatusId)?.colorHex
+                            }
+                          />
+                        ) : (
+                          t("students.modal.statusNotSet")
+                        )
+                      }
+                      isDarkUi={isDarkUi}
+                    />
                     <DetailRow label={t("students.col.registrationType")} value={row.registrationType === "continuing" ? "Continuing" : "First Registration"} isDarkUi={isDarkUi} />
                     <DetailRow label={t("learner.gender")} value={row.gender} isDarkUi={isDarkUi} />
                     <DetailRow label={t("students.col.dob")} value={row.dateOfBirthFormatted} isDarkUi={isDarkUi} />
@@ -391,6 +488,32 @@ export function StudentDetailModal({
                       <label className={`text-[10px] font-black uppercase tracking-widest ${isDarkUi ? "text-slate-500" : "text-slate-400"}`}>{t("students.form.lastName")} *</label>
                       <input className={fieldClass} value={lastName} onChange={(e) => setLastName(e.target.value)} />
                     </div>
+                    {studentStatuses.length > 0 ? (
+                      <div className="space-y-1.5 sm:col-span-2">
+                        <label
+                          className={`text-[10px] font-black uppercase tracking-widest ${isDarkUi ? "text-slate-500" : "text-slate-400"}`}
+                        >
+                          {t("students.modal.studentStatus")} *
+                        </label>
+                        <select
+                          className={fieldClass}
+                          value={studentStatusId}
+                          onChange={(e) => setStudentStatusId(e.target.value)}
+                        >
+                          <option value="">{t("students.modal.selectStatus")}</option>
+                          {studentStatuses.map((s) => (
+                            <option key={s.id} value={String(s.id)}>
+                              {s.code} — {s.name}
+                            </option>
+                          ))}
+                        </select>
+                        {statusChanged ? (
+                          <div className="mt-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">
+                            {t("students.modal.statusChangeHint")}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div className="space-y-1.5">
                       <label className={`text-[10px] font-black uppercase tracking-widest ${isDarkUi ? "text-slate-500" : "text-slate-400"}`}>{t("students.form.gender")}</label>
                       <select className={fieldClass} value={gender} onChange={(e) => setGender(e.target.value)}>
@@ -503,17 +626,21 @@ export function StudentDetailModal({
              ) : (
                <>
                   <button
+                    type="button"
                     onClick={() => {
                        setEditing(false);
-                       if (row) reload();
+                       setConfirmSaveOpen(false);
+                       setStatusChangeOpen(false);
+                       if (row) void reload();
                     }}
                     className={`flex-1 py-3 rounded-2xl font-black text-sm transition-all ${isDarkUi ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
                   >
                     Cancel
                   </button>
                   <button
+                    type="button"
                     disabled={saving}
-                    onClick={() => setConfirmSaveOpen(true)}
+                    onClick={requestSave}
                     className="flex-[2] py-3 rounded-2xl bg-gradient-to-r from-[#0c2340] to-[#1a3a5c] text-white font-black text-sm shadow-xl shadow-[#0c2340]/20 transition-all hover:-translate-y-1"
                   >
                     {saving ? "Saving Changes..." : "Save Changes"}
@@ -527,11 +654,27 @@ export function StudentDetailModal({
   );
 }
 
-function DetailRow({ label, value, isDarkUi }: { label: string; value: string | null | undefined; isDarkUi: boolean }) {
+function DetailRow({
+  label,
+  value,
+  isDarkUi,
+}: {
+  label: string;
+  value: ReactNode;
+  isDarkUi: boolean;
+}) {
   return (
-    <div className={`flex items-center justify-between py-3 border-b border-dashed ${isDarkUi ? "border-slate-800" : "border-slate-100"}`}>
-      <span className={`text-[10px] font-black uppercase tracking-widest ${isDarkUi ? "text-slate-500" : "text-slate-400"}`}>{label}</span>
-      <span className={`text-sm font-bold ${isDarkUi ? "text-slate-200" : "text-[#0c2340]"}`}>{value || "—"}</span>
+    <div
+      className={`flex items-center justify-between gap-4 py-3 border-b border-dashed ${isDarkUi ? "border-slate-800" : "border-slate-100"}`}
+    >
+      <span
+        className={`shrink-0 text-[10px] font-black uppercase tracking-widest ${isDarkUi ? "text-slate-500" : "text-slate-400"}`}
+      >
+        {label}
+      </span>
+      <span className={`text-right text-sm font-bold ${isDarkUi ? "text-slate-200" : "text-[#0c2340]"}`}>
+        {value == null || value === "" ? "—" : value}
+      </span>
     </div>
   );
 }

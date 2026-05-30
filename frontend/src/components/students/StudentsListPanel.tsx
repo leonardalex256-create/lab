@@ -13,6 +13,9 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { exportStudentsToXlsx } from "../../utils/exportStudentsXlsx";
 import { AuthenticatedStudentPhoto } from "./AuthenticatedStudentPhoto";
 import { StudentDetailModal } from "./StudentDetailModal";
+import { StudentStatusBadge } from "../statuses/StudentStatusBadge";
+import { useStudentStatuses } from "../../hooks/useStudentStatuses";
+import { studentFeeStatusLabel } from "../../utils/studentStatusDisplay";
 
 const selectClass =
   "rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition-all focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 hover:border-slate-300";
@@ -37,19 +40,9 @@ type CustomSortColumn =
   | "fullName"
   | "className"
   | "sectionName"
-  | "boardingStatus"
+  | "studentStatus"
   | "admittedAt";
 type ExportFormat = "excel" | "pdf";
-
-function formatStudentStatus(status: string | null): string {
-  if (!status) return "—";
-  const normalized = status.trim().toLowerCase();
-  if (!normalized) return "—";
-  return normalized
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
 
 function customColumnValue(row: StudentApiRow, column: CustomSortColumn): string {
   switch (column) {
@@ -61,8 +54,8 @@ function customColumnValue(row: StudentApiRow, column: CustomSortColumn): string
       return row.className ?? "";
     case "sectionName":
       return row.sectionName ?? "";
-    case "boardingStatus":
-      return formatStudentStatus(row.boardingStatus);
+    case "studentStatus":
+      return studentFeeStatusLabel(row);
     case "admittedAt":
       return row.admittedAt ?? "";
     default:
@@ -142,6 +135,7 @@ export function StudentsListPanel({
   permissions,
 }: StudentsListPanelProps) {
   const { t } = useI18n();
+  const { statuses: feeStatuses } = useStudentStatuses();
   // Permission helpers — undefined means "all allowed" (admin)
   const canView = !permissions || permissions.includes("students_view") || permissions.includes("students_all");
   const canEdit = !permissions || permissions.includes("students_edit");
@@ -149,6 +143,7 @@ export function StudentsListPanel({
   const canExport = !permissions || permissions.includes("students_export");
   const [draft, setDraft] = useState("");
   const [applied, setApplied] = useState("");
+  const [missingStatusOnly, setMissingStatusOnly] = useState(false);
   const [sortBy, setSortBy] = useState<StudentSortOption>("date");
   const [sortDir, setSortDir] = useState<StudentSortDir>("desc");
   const [customSortColumn, setCustomSortColumn] = useState<CustomSortColumn>("fullName");
@@ -180,7 +175,14 @@ export function StudentsListPanel({
     setError(null);
     const q = classNameFilter ? `${classNameFilter} ${applied}`.trim() : applied;
     const apiSortBy: StudentSortBy = sortBy === "custom" ? "date" : sortBy;
-    void fetchStudents({ q, sortBy: apiSortBy, sortDir, limit, offset })
+    void fetchStudents({
+      q,
+      sortBy: apiSortBy,
+      sortDir,
+      limit,
+      offset,
+      missingStatus: missingStatusOnly ? true : undefined,
+    })
       .then((data) => {
         if (!cancelled) {
           const filtered = classNameFilter
@@ -205,7 +207,7 @@ export function StudentsListPanel({
     return () => {
       cancelled = true;
     };
-  }, [applied, sortBy, sortDir, limit, offset, refreshKey, classNameFilter]);
+  }, [applied, sortBy, sortDir, limit, offset, refreshKey, classNameFilter, missingStatusOnly]);
 
   const runSearch = () => {
     setApplied(draft.trim());
@@ -219,7 +221,24 @@ export function StudentsListPanel({
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load profile"));
   };
 
+  useEffect(() => {
+    // If the header global search asked to open a specific student, do it once on mount.
+    try {
+      const raw = sessionStorage.getItem("globalSearch.openStudentId");
+      if (!raw) return;
+      const id = Number(raw);
+      if (!Number.isFinite(id) || id <= 0) return;
+      sessionStorage.removeItem("globalSearch.openStudentId");
+      openView(id);
+    } catch {
+      /* ignore */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const openEdit = (id: number) => {
+    setProfileCard(null);
+    setError(null);
     setModalInitialEdit(true);
     setModalId(id);
   };
@@ -291,7 +310,7 @@ export function StudentsListPanel({
         row.fullName,
         row.className ?? "—",
         row.sectionName ?? "—",
-        formatStudentStatus(row.boardingStatus),
+        studentFeeStatusLabel(row),
         row.dateOfBirthFormatted ?? "—",
         row.admittedAt,
       ]),
@@ -450,6 +469,17 @@ export function StudentsListPanel({
                   className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-800 shadow-sm outline-none transition-all placeholder:text-slate-400 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 hover:border-slate-300"
                 />
               </div>
+              <label className="mt-2 flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={missingStatusOnly}
+                  onChange={(e) => {
+                    setMissingStatusOnly(e.target.checked);
+                    setOffset(0);
+                  }}
+                />
+                Missing student status only
+              </label>
             </div>
             <div className="flex flex-col gap-1.5">
               <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -481,7 +511,7 @@ export function StudentsListPanel({
                       <option value="admissionNumber">{t("students.col.admission")}</option>
                       <option value="className">{t("students.col.class")}</option>
                       <option value="sectionName">{t("students.col.section")}</option>
-                      <option value="boardingStatus">{t("students.col.status")}</option>
+                      <option value="studentStatus">{t("students.modal.studentStatus")}</option>
                       <option value="admittedAt">{t("students.col.admitted")}</option>
                     </select>
                     <input
@@ -554,7 +584,7 @@ export function StudentsListPanel({
                 <th className="w-[11%] px-2 py-4 sm:px-4">{t("students.col.dob")}</th>
                 <th className="w-[12%] px-2 py-4 sm:px-4">{t("students.col.admitted")}</th>
                 {showDirectoryTools && (
-                  <th className="w-24 px-2 py-4 text-center sm:w-28 sm:px-4">
+                  <th className="w-[7.5rem] min-w-[7.5rem] px-2 py-4 text-center sm:px-4">
                     {t("students.col.actions")}
                   </th>
                 )}
@@ -617,9 +647,17 @@ export function StudentsListPanel({
                     {row.sectionName ?? "—"}
                   </td>
                   <td className="min-w-0 truncate px-2 py-3 text-xs font-medium sm:px-4">
-                    <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold text-slate-700">
-                      {formatStudentStatus(row.boardingStatus)}
-                    </span>
+                    {row.studentStatusCode || row.studentStatusName ? (
+                      <StudentStatusBadge
+                        code={row.studentStatusCode}
+                        name={row.studentStatusName}
+                        colorHex={
+                          feeStatuses.find((s) => s.id === row.studentStatusId)?.colorHex
+                        }
+                      />
+                    ) : (
+                      <span className="text-slate-400">{t("students.modal.statusNotSet")}</span>
+                    )}
                   </td>
                   <td className="min-w-0 truncate px-2 py-3 text-xs tabular-nums text-slate-500 sm:px-4 sm:text-sm">
                     {row.dateOfBirthFormatted ?? "—"}
@@ -628,8 +666,8 @@ export function StudentsListPanel({
                     {row.admittedAt}
                   </td>
                   {showDirectoryTools && (
-                    <td className="px-1 py-3 sm:px-4">
-                      <div className="flex items-center justify-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+                    <td className="px-2 py-3 sm:px-4">
+                      <div className="flex min-w-[7.25rem] items-center justify-center gap-1 sm:gap-1.5">
                         {canView && (
                         <button
                           type="button"
@@ -784,6 +822,7 @@ export function StudentsListPanel({
       <StudentDetailModal
         studentId={modalId}
         initialEditing={modalInitialEdit}
+        permissions={permissions}
         onClose={() => {
           setModalId(null);
           setModalInitialEdit(false);

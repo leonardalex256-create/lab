@@ -17,7 +17,13 @@ import { InboxListView } from "../components/inbox/InboxListView";
 import type { InboxItem } from "../components/admin/headerInboxDemo";
 import { SettingsModesPanel } from "../components/settings/SettingsModesPanel";
 import { SettingsGeneralPanel } from "../components/settings/SettingsGeneralPanel";
-import { SettingsFeesStructurePanel } from "../components/settings/SettingsFeesStructurePanel";
+import {
+  FeesSettingsStructurePage,
+  type FeesSetupStep,
+} from "../components/settings/fees/FeesSettingsStructurePage";
+import { StatusWizard } from "../components/statuses/StatusWizard";
+import { LegacyStatusBanner } from "../components/students/LegacyStatusBanner";
+import { fetchStudentStatusCount } from "../api/studentStatuses";
 import { SettingsClassStructurePanel } from "../components/settings/SettingsClassStructurePanel";
 import { SettingsAcademicPanel } from "../components/settings/SettingsAcademicPanel";
 import { SettingsUsersRolesPanel } from "../components/settings/SettingsUsersRolesPanel";
@@ -412,6 +418,12 @@ function canAccessSettingsPanel(
   if (panel === "general") return hasPermission(role, permissions, "settings_general");
   if (panel === "modes") return hasPermission(role, permissions, "settings_modes");
   if (panel === "fees_structure") return hasPermission(role, permissions, "settings_fees_structure");
+  if (panel === "fees_settings_structure") {
+    return hasPermission(role, permissions, "settings_fees_structure");
+  }
+  if (panel === "student_statuses" || panel === "fee_categories" || panel === "fee_rules") {
+    return hasPermission(role, permissions, "settings_fees_structure");
+  }
   if (panel === "class_structure") return hasPermission(role, permissions, "settings_general");
   if (panel === "academic_settings") return hasPermission(role, permissions, "settings_general");
   if (panel === "backup") return hasPermission(role, permissions, "settings_backup");
@@ -611,6 +623,14 @@ export function Dashboard({
     initialView?.selectedClassName ?? null,
   );
   const overviewKind = useMemo(() => resolveOverviewKind(user?.role), [user?.role]);
+  const [statusWizardRequired, setStatusWizardRequired] = useState(false);
+  const [feesSetupInitialStep, setFeesSetupInitialStep] = useState<FeesSetupStep>(1);
+
+  useEffect(() => {
+    void fetchStudentStatusCount()
+      .then((count) => setStatusWizardRequired(count === 0))
+      .catch(() => setStatusWizardRequired(false));
+  }, []);
 
   const termCtx = useTermContext();
   const dashboardCalendarMonth = useMemo(() => {
@@ -861,6 +881,21 @@ export function Dashboard({
       onSelectSettingsPanel={(panel) => {
         if (!canAccessSettingsPanel(user?.role, user?.permissions, panel)) return;
         setInboxScreen({ screen: "home" });
+        if (panel === "student_statuses") {
+          setFeesSetupInitialStep(1);
+          setSettingsPanel("fees_settings_structure");
+          return;
+        }
+        if (panel === "fee_categories") {
+          setFeesSetupInitialStep(2);
+          setSettingsPanel("fees_settings_structure");
+          return;
+        }
+        if (panel === "fee_rules") {
+          setFeesSetupInitialStep(3);
+          setSettingsPanel("fees_settings_structure");
+          return;
+        }
         setSettingsPanel(panel);
       }}
       onSelectStudentSection={(section) => {
@@ -929,9 +964,20 @@ export function Dashboard({
     >
       <main className="dashboard-main-padding">
         <ViewingContextBanner />
+        {mainView === "dashboard" && !settingsPanel ? <LegacyStatusBanner /> : null}
         {settingsPanel === "general" ? <SettingsGeneralPanel /> : null}
         {settingsPanel === "modes" ? <SettingsModesPanel /> : null}
-        {settingsPanel === "fees_structure" ? <SettingsFeesStructurePanel /> : null}
+        {settingsPanel === "fees_settings_structure" ? (
+          <FeesSettingsStructurePage
+            key={`fees-setup-${feesSetupInitialStep}`}
+            initialStep={feesSetupInitialStep}
+            onSetupProgressChange={() => {
+              void fetchStudentStatusCount()
+                .then((count) => setStatusWizardRequired(count === 0))
+                .catch(() => setStatusWizardRequired(false));
+            }}
+          />
+        ) : null}
         {settingsPanel === "class_structure" ? <SettingsClassStructurePanel /> : null}
         {settingsPanel === "academic_settings" ? <SettingsAcademicPanel /> : null}
         {settingsPanel === "users_roles" ? <SettingsUsersRolesPanel /> : null}
@@ -939,7 +985,10 @@ export function Dashboard({
         {settingsPanel === "audit_log" ? <SettingsAuditLogPanel /> : null}
         {settingsPanel === "general" ||
         settingsPanel === "modes" ||
-        settingsPanel === "fees_structure" ||
+        settingsPanel === "fees_settings_structure" ||
+        settingsPanel === "student_statuses" ||
+        settingsPanel === "fee_categories" ||
+        settingsPanel === "fee_rules" ||
         settingsPanel === "class_structure" ||
         settingsPanel === "academic_settings" ||
         settingsPanel === "notifications" ||
@@ -1091,6 +1140,18 @@ export function Dashboard({
           </div>
         )}
       </main>
+      {statusWizardRequired ? (
+        <StatusWizard
+          onComplete={() => setStatusWizardRequired(false)}
+          onOpenFeesSettings={() => {
+            setStatusWizardRequired(false);
+            setFeesSetupInitialStep(1);
+            setMainView("dashboard");
+            setSettingsPanel("fees_settings_structure");
+            setInboxScreen({ screen: "home" });
+          }}
+        />
+      ) : null}
     </AdminLayout>
   );
 }

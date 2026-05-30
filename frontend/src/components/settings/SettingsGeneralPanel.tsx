@@ -1,6 +1,14 @@
 import { useEffect, useState, useRef } from "react";
 import { debugClientLog } from "../../api/debugSessionLog";
 import { fetchGeneralSettings, saveGeneralSettings } from "../../api/settingsGeneral";
+import {
+  Toast,
+  UnsavedBar,
+  PanelHeader,
+  SettingsSection,
+  SettingsRow,
+  LoadingSpinner,
+} from "./shared";
 
 type ToastMessage = {
   message: string;
@@ -64,7 +72,7 @@ export function SettingsGeneralPanel() {
           const message =
             err instanceof Error ? err.message : "Failed to load settings.";
           // #region agent log
-          debugClientLog({
+          if (import.meta.env.DEV) debugClientLog({
             hypothesisId: "H3",
             location: "SettingsGeneralPanel.tsx:load:catch",
             message: "settings_panel_load_failed",
@@ -129,25 +137,16 @@ export function SettingsGeneralPanel() {
       setDirty(false);
       window.dispatchEvent(new CustomEvent("settings:general-updated", { detail: merged }));
       setToast({ message: "Settings saved successfully.", type: "success" });
-    } catch (err: any) {
-      setToast({ message: err.message || "Failed to save settings.", type: "error" });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to save settings.";
+      setToast({ message, type: "error" });
     } finally {
       setSaving(false);
     }
   }
 
   if (loading) {
-    return (
-      <div className="flex min-h-[40vh] items-center justify-center p-8">
-        <div className="flex flex-col items-center gap-4 text-[#94a3b8]">
-          <svg className="h-8 w-8 animate-spin" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-          <span className="text-sm font-semibold uppercase tracking-widest">Loading Settings</span>
-        </div>
-      </div>
-    );
+    return <LoadingSpinner label="Loading Settings" />;
   }
 
   const baseControlClass =
@@ -176,25 +175,18 @@ export function SettingsGeneralPanel() {
 
   return (
     <section className="mx-auto max-w-[860px] space-y-8 animate-in fade-in slide-in-from-bottom-3 duration-500 pb-24">
-      <header className="neo-card relative overflow-hidden rounded-2xl bg-white px-6 py-8 sm:px-8 shadow-sm">
-        <div className="absolute top-0 left-0 h-1.5 w-full bg-gradient-to-r from-[#0c2340] to-[#ea580c]" />
-        <div className="flex items-center gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#0c2340]/10 to-[#ea580c]/10 text-2xl shadow-inner">
-            🏫
-          </div>
-          <div>
-            <h1 className="text-2xl font-black tracking-tight text-[#0c2340]">General Settings</h1>
-            <p className="mt-1 text-sm font-medium text-slate-500">
-              Configure school profile, preferences, access rules, and security policy.
-            </p>
-          </div>
-        </div>
-      </header>
+      <PanelHeader
+        gradient
+        icon={<span aria-hidden>🏫</span>}
+        title="General Settings"
+        description="Configure school profile, preferences, access rules, and security policy."
+      />
 
       <SettingsSection title="General">
         <SettingsRow
           label="School Name"
           description="Main school name used across dashboards and reports."
+          required
           control={
             <input
               value={settings.school_name}
@@ -265,6 +257,7 @@ export function SettingsGeneralPanel() {
         <SettingsRow
           label="Academic Year"
           description="Current active academic year."
+          required
           control={
             <input
               value={settings.academic_year}
@@ -371,6 +364,7 @@ export function SettingsGeneralPanel() {
         <SettingsRow
           label="Currency Code"
           description="Currency used for fee, expense, and payroll values."
+          required
           control={
             <input
               value={settings.currency_code}
@@ -382,6 +376,7 @@ export function SettingsGeneralPanel() {
         <SettingsRow
           label="Country"
           description="Country-level default for regional forms."
+          required
           control={
             <input
               value={settings.country}
@@ -446,7 +441,7 @@ export function SettingsGeneralPanel() {
         />
       </SettingsSection>
 
-      <SettingsSection title="Notifications">
+      <SettingsSection title="Security">
         <SettingsRow
           label="MFA Required for Admin"
           description="Require multi-factor authentication for administrator accounts."
@@ -533,103 +528,17 @@ export function SettingsGeneralPanel() {
         />
       </SettingsSection>
 
-      <div className="neo-card sticky bottom-6 z-10 flex flex-wrap items-center justify-between gap-4 rounded-2xl bg-slate-50/90 px-6 py-4 shadow-xl backdrop-blur-md">
-        <div className="flex items-center gap-3">
-          {dirty ? (
-            <>
-              <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
-              <span className="text-sm font-bold text-amber-600">Unsaved changes</span>
-              <button
-                type="button"
-                onClick={discardChanges}
-                className="text-sm font-bold text-slate-500 underline underline-offset-2 hover:text-slate-800 transition"
-              >
-                Discard
-              </button>
-            </>
-          ) : (
-            <span className="text-sm font-bold text-slate-400">All changes saved</span>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={onSave}
-          disabled={
-            saving ||
-            !dirty ||
-            !settings.school_name?.trim() ||
-            !settings.academic_year?.trim() ||
-            !settings.currency_code?.trim() ||
-            !settings.country?.trim()
-          }
-          className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#0c2340] to-[#1a3a5c] px-6 py-3 text-sm font-bold text-white shadow-lg shadow-[#0c2340]/20 transition-all hover:-translate-y-0.5 hover:shadow-xl disabled:pointer-events-none disabled:opacity-60"
-        >
-          {saving && (
-            <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-            </svg>
-          )}
-          {saving ? "Saving..." : "Save Settings"}
-        </button>
-      </div>
+      <UnsavedBar
+        dirty={dirty}
+        saving={saving}
+        onSave={onSave}
+        onDiscard={discardChanges}
+        saveLabel="Save Settings"
+      />
 
       {toast ? (
-        <div className="fixed bottom-24 right-6 z-50 animate-in fade-in slide-in-from-bottom-4">
-          <div className={`flex items-center gap-3 rounded-2xl px-5 py-3 text-sm font-semibold shadow-2xl backdrop-blur-md ${
-            toast.type === "success" ? "bg-emerald-50/90 text-emerald-800 ring-1 ring-emerald-200" : "bg-red-50/90 text-red-800 ring-1 ring-red-200"
-          }`}>
-            <span>{toast.type === "success" ? "✅" : "❌"}</span>
-            <span>{toast.message}</span>
-            <button onClick={() => setToast(null)} className="ml-2 rounded-full p-1 opacity-70 hover:bg-black/5 hover:opacity-100 transition">
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        </div>
+        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
       ) : null}
     </section>
-  );
-}
-
-type SettingsSectionProps = {
-  title: string;
-  children: React.ReactNode;
-};
-
-function SettingsSection({ title, children }: SettingsSectionProps) {
-  return (
-    <section>
-      <h2 className="mb-3 px-2 text-[10px] font-black uppercase tracking-widest text-slate-400">{title}</h2>
-      <div className="neo-card overflow-hidden rounded-2xl bg-white shadow-sm border border-slate-100">
-        {children}
-      </div>
-    </section>
-  );
-}
-
-type SettingsRowProps = {
-  label: string;
-  description: string;
-  control: React.ReactNode;
-};
-
-function SettingsRow({ label, description, control }: SettingsRowProps) {
-  // If it's a required field visually based on our previous logic, we check label text
-  const isRequired = ["School Name", "Academic Year", "Currency Code", "Country"].includes(label);
-
-  return (
-    <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-5 sm:px-6 last:border-b-0 hover:bg-slate-50/50 transition-colors sm:flex-row sm:items-center sm:justify-between sm:gap-6">
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-bold text-slate-800">
-          {label} {isRequired && <span className="text-red-500">*</span>}
-        </p>
-        <p className="mt-1 max-w-xl text-xs font-semibold text-slate-500 leading-relaxed">
-          {description}
-        </p>
-      </div>
-      <div className="shrink-0 flex sm:justify-end">{control}</div>
-    </div>
   );
 }

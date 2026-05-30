@@ -5,6 +5,7 @@ import {
   type FeeStructureRow,
 } from "../../api/financeFeeStructure";
 import { formatCurrencyUGX } from "../finance/shared/financeFormat";
+import { Toast, UnsavedBar, LoadingSpinner } from "./shared";
 
 /* ── local row state ────────────────────────────────────── */
 type RowState = {
@@ -53,59 +54,6 @@ function toRows(items: FeeStructureRow[]): RowState[] {
   }));
 }
 
-/* ── toast component ────────────────────────────────────── */
-function Toast({
-  message,
-  type,
-  onClose,
-}: {
-  message: string;
-  type: "success" | "error";
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const timer = setTimeout(onClose, 5000);
-    return () => clearTimeout(timer);
-  }, [onClose]);
-
-  return (
-    <div
-      className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 rounded-2xl px-5 py-3 text-sm font-semibold shadow-2xl backdrop-blur-md transition-all animate-in slide-in-from-bottom-4 fade-in duration-300 ${
-        type === "success"
-          ? "bg-emerald-50/90 text-emerald-800 ring-1 ring-emerald-200"
-          : "bg-red-50/90 text-red-800 ring-1 ring-red-200"
-      }`}
-    >
-      <span className="text-lg">{type === "success" ? "✅" : "❌"}</span>
-      <span>{message}</span>
-      <button onClick={onClose} className="ml-2 rounded-full p-1 hover:bg-black/5 transition">
-        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-        </svg>
-      </button>
-    </div>
-  );
-}
-
-/* ── skeleton loader ────────────────────────────────────── */
-function SkeletonCards() {
-  return (
-    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-      {[...Array(4)].map((_, i) => (
-        <div
-          key={i}
-          className="neo-card animate-pulse p-5"
-          style={{ animationDelay: `${i * 120}ms` }}
-        >
-          <div className="mb-4 h-1.5 w-20 rounded-full bg-[#e2e8ef]" />
-          <div className="h-4 w-32 rounded-lg bg-[#e2e8ef]" />
-          <div className="mt-4 h-10 w-full rounded-lg bg-[#e2e8ef]" />
-          <div className="mt-3 h-8 w-full rounded-lg bg-[#e2e8ef]" />
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /* ── MAIN COMPONENT ─────────────────────────────────────── */
 export function SettingsFeesStructurePanel() {
@@ -148,10 +96,13 @@ export function SettingsFeesStructurePanel() {
 
   /* dirty tracking */
   useEffect(() => {
-    if (originalRef.current && JSON.stringify(rows) !== originalRef.current) {
+    if (!originalRef.current) return;
+    if (JSON.stringify(rows) !== originalRef.current || deletedStatuses.length > 0) {
       setDirty(true);
+    } else {
+      setDirty(false);
     }
-  }, [rows]);
+  }, [rows, deletedStatuses]);
 
   /* computed totals */
   const previewTotal = useMemo(
@@ -317,7 +268,7 @@ export function SettingsFeesStructurePanel() {
 
       {/* ── CARDS GRID ──────────────────────────────────────── */}
       {loading ? (
-        <SkeletonCards />
+        <LoadingSpinner label="Loading fee structure" />
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {rows.map((row, idx) => {
@@ -481,44 +432,17 @@ export function SettingsFeesStructurePanel() {
         </div>
       )}
 
-      {/* ── ACTION BAR ──────────────────────────────────────── */}
-      <div className="neo-card sticky bottom-4 z-10 flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          {dirty && (
-            <span className="flex items-center gap-2 animate-in fade-in duration-300">
-              <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-              <span className="text-xs font-semibold text-amber-600">Unsaved changes</span>
-              <button
-                type="button"
-                onClick={discardChanges}
-                className="ml-1 text-xs font-bold text-[#64748b] underline underline-offset-2 transition hover:text-[#1e293b]"
-              >
-                Discard
-              </button>
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-3">
-          <span className="hidden text-xs text-[#94a3b8] sm:inline">
-            {rows.length} {rows.length === 1 ? "category" : "categories"} configured
-          </span>
-          <button
-            type="button"
-            onClick={() => void onApply()}
-            disabled={saving || loading}
-            className="relative flex items-center gap-2 rounded-2xl bg-gradient-to-r from-[#0ea5e9] to-[#2563eb] px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-blue-200 transition-all hover:shadow-xl hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {saving && (
-              <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-            )}
-            {saving ? "Applying..." : "Apply Fee Structure"}
-          </button>
-        </div>
-      </div>
+      <UnsavedBar
+        dirty={dirty}
+        saving={saving}
+        onSave={() => void onApply()}
+        onDiscard={discardChanges}
+        saveLabel="Apply Fee Structure"
+      >
+        <span className="text-xs font-semibold text-slate-500">
+          {rows.length} {rows.length === 1 ? "category" : "categories"} · Total: {formatCurrencyUGX(previewTotal)}
+        </span>
+      </UnsavedBar>
 
       {/* ── TOAST ────────────────────────────────────────────── */}
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}

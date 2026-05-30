@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { apiUrl, authHeaders } from "../../api/baseUrl";
+import { Toast, PanelHeader, LoadingSpinner } from "./shared";
 
 type EventType =
   | "fee_payment_received"
@@ -37,6 +38,8 @@ const CHANNELS: Channel[] = ["email", "in_app"];
 
 type SettingsMatrix = Record<EventType, Record<Channel, boolean>>;
 
+type ToastState = { message: string; type: "success" | "error" } | null;
+
 function defaultMatrix(): SettingsMatrix {
   const m = {} as SettingsMatrix;
   for (const e of EVENTS) {
@@ -49,7 +52,7 @@ export function SettingsNotificationsPanel() {
   const [matrix, setMatrix] = useState<SettingsMatrix>(defaultMatrix());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastState>(null);
 
   useEffect(() => {
     (async () => {
@@ -65,7 +68,9 @@ export function SettingsNotificationsPanel() {
           }
           setMatrix(m);
         }
-      } catch { /* */ }
+      } catch {
+        /* ignore */
+      }
       setLoading(false);
     })();
   }, []);
@@ -92,78 +97,102 @@ export function SettingsNotificationsPanel() {
         body: JSON.stringify({ settings: rows }),
       });
       const json = await res.json();
-      setToast(json.success ? "Notification settings saved!" : (json.error ?? "Error saving"));
-      setTimeout(() => setToast(null), 3000);
+      setToast(
+        json.success
+          ? { message: "Notification settings saved!", type: "success" }
+          : { message: json.error ?? "Error saving", type: "error" },
+      );
     } catch {
-      setToast("Network error");
+      setToast({ message: "Network error", type: "error" });
     }
     setSaving(false);
   };
 
   if (loading) {
-    return <div className="space-y-3">{[...Array(7)].map((_, i) => <div key={i} className="h-14 bg-slate-100 rounded-xl animate-pulse" />)}</div>;
+    return <LoadingSpinner label="Loading notifications" />;
   }
 
   return (
-    <div className="space-y-5">
-      {toast && (
-        <div className="fixed top-4 right-4 z-50 bg-blue-600 text-white px-5 py-3 rounded-xl shadow-lg font-semibold text-sm">{toast}</div>
-      )}
+    <div className="space-y-5 pb-8">
+      <PanelHeader
+        icon={<span aria-hidden>🔔</span>}
+        title="Notification Settings"
+        description="Control which events trigger emails and in-app notifications"
+        action={
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={saving}
+            className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-blue-700 disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save Changes"}
+          </button>
+        }
+      />
 
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-bold text-slate-800">Notification Settings</h2>
-          <p className="text-sm text-slate-500">Control which events trigger emails and in-app notifications</p>
-        </div>
-        <button onClick={save} disabled={saving}
-          className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl font-semibold shadow-md transition-all">
-          {saving ? "Saving…" : "Save Changes"}
-        </button>
-      </div>
-
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-sm">
         <table className="w-full">
-          <thead className="bg-slate-50 border-b border-slate-100">
+          <thead className="border-b border-slate-100 bg-slate-50">
             <tr>
-              <th className="text-left px-6 py-4 text-sm font-semibold text-slate-600">Event Type</th>
-              <th className="text-center px-6 py-4 text-sm font-semibold text-slate-600">
+              <th scope="col" className="px-6 py-4 text-left text-sm font-semibold text-slate-600">
+                Event Type
+              </th>
+              <th scope="col" className="px-6 py-4 text-center text-sm font-semibold text-slate-600">
                 <div className="flex items-center justify-center gap-2">📧 Email</div>
               </th>
-              <th className="text-center px-6 py-4 text-sm font-semibold text-slate-600">
+              <th scope="col" className="px-6 py-4 text-center text-sm font-semibold text-slate-600">
                 <div className="flex items-center justify-center gap-2">🔔 In-App</div>
               </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-50">
             {EVENTS.map((ev) => (
-              <tr key={ev} className="hover:bg-slate-50 transition-colors">
+              <tr key={ev} className="transition-colors hover:bg-slate-50">
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
-                    <span className="text-xl">{EVENT_ICONS[ev]}</span>
+                    <span className="text-xl" aria-hidden>
+                      {EVENT_ICONS[ev]}
+                    </span>
                     <span className="font-medium text-slate-800">{EVENT_LABELS[ev]}</span>
                   </div>
                 </td>
-                {CHANNELS.map((ch) => (
-                  <td key={ch} className="px-6 py-4 text-center">
-                    <button
-                      onClick={() => toggle(ev, ch)}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${matrix[ev]![ch] ? "bg-blue-600" : "bg-slate-200"}`}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-md transition-transform ${matrix[ev]![ch] ? "translate-x-6" : "translate-x-1"}`}
-                      />
-                    </button>
-                  </td>
-                ))}
+                {CHANNELS.map((ch) => {
+                  const enabled = matrix[ev]![ch]!;
+                  const channelLabel = ch === "email" ? "Email" : "In-app";
+                  return (
+                    <td key={ch} className="px-6 py-4 text-center">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={enabled}
+                        aria-label={`${EVENT_LABELS[ev]} — ${channelLabel}`}
+                        onClick={() => toggle(ev, ch)}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                          enabled ? "bg-blue-600" : "bg-slate-200"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-md transition-transform ${
+                            enabled ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
 
-      <p className="text-xs text-slate-400 text-center">
+      <p className="text-center text-xs text-slate-400">
         Changes take effect immediately for new events. Existing queued notifications are not affected.
       </p>
+
+      {toast ? (
+        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
+      ) : null}
     </div>
   );
 }

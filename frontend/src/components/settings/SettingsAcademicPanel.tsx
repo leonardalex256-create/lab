@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { fetchGradingScales, saveGradingScale, type GradingScaleRow } from "../../api/academics";
+import { Toast, UnsavedBar, PanelHeader, LoadingSpinner } from "./shared";
 
 type ToastMessage = {
   message: string;
@@ -7,10 +8,20 @@ type ToastMessage = {
 };
 
 type GradingThreshold = {
+  uid: string;
   min: number;
   grade: string;
   agg: number;
 };
+
+function withUid(t: { min: number; grade: string; agg: number }): GradingThreshold {
+  return { ...t, uid: crypto.randomUUID() };
+}
+
+function stripUid(t: GradingThreshold): { min: number; grade: string; agg: number } {
+  const { uid: _uid, ...rest } = t;
+  return rest;
+}
 
 export function SettingsAcademicPanel() {
   const [scales, setScales] = useState<GradingScaleRow[]>([]);
@@ -32,9 +43,10 @@ export function SettingsAcademicPanel() {
           if (data.length > 0) {
             const first = data[0];
             setActiveScaleId(first.id);
-            const thresholds = Array.isArray(first.thresholds) ? (first.thresholds as GradingThreshold[]) : [];
-            // Sort by min score descending like in the old project
-            const sorted = [...thresholds].sort((a, b) => b.min - a.min);
+            const raw = Array.isArray(first.thresholds)
+              ? (first.thresholds as Array<{ min: number; grade: string; agg: number }>)
+              : [];
+            const sorted = [...raw].sort((a, b) => b.min - a.min).map(withUid);
             setLocalThresholds(sorted);
             originalThresholdsRef.current = JSON.stringify(sorted);
           }
@@ -65,17 +77,14 @@ export function SettingsAcademicPanel() {
   }, [localThresholds]);
 
   function addRule() {
-    setLocalThresholds((prev) => [
-      ...prev,
-      { min: 0, grade: "", agg: 1 },
-    ]);
+    setLocalThresholds((prev) => [...prev, withUid({ min: 0, grade: "", agg: 1 })]);
   }
 
   function removeRule(index: number) {
     setLocalThresholds((prev) => prev.filter((_, i) => i !== index));
   }
 
-  function updateRule(index: number, field: keyof GradingThreshold, value: any) {
+  function updateRule(index: number, field: keyof GradingThreshold, value: string | number) {
     setLocalThresholds((prev) =>
       prev.map((r, i) => (i === index ? { ...r, [field]: value } : r))
     );
@@ -86,70 +95,64 @@ export function SettingsAcademicPanel() {
     setSaving(true);
     setToast(null);
     try {
-      // Validate
-      const invalid = localThresholds.some(t => !t.grade.trim() || t.min < 0 || t.min > 100);
+      if (localThresholds.length === 0) {
+        throw new Error("Add at least one grading rule.");
+      }
+      const invalid = localThresholds.some((t) => !t.grade.trim() || t.min < 0 || t.min > 100);
       if (invalid) {
-          throw new Error("Please ensure all grades are entered and scores are between 0-100.");
+        throw new Error("Please ensure all grades are entered and scores are between 0-100.");
       }
 
-      const activeScale = scales.find(s => s.id === activeScaleId);
+      const activeScale = scales.find((s) => s.id === activeScaleId);
       await saveGradingScale({
         id: activeScaleId,
         name: activeScale?.name || "Global Scale",
-        thresholds: localThresholds
+        thresholds: localThresholds.map(stripUid),
       });
       
       originalThresholdsRef.current = JSON.stringify(localThresholds);
       setDirty(false);
       setToast({ message: "Grading system updated successfully.", type: "success" });
-    } catch (err: any) {
-      setToast({ message: err.message || "Failed to save grading scale.", type: "error" });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to save grading scale.";
+      setToast({ message, type: "error" });
     } finally {
       setSaving(false);
     }
   }
 
   if (loading) {
-    return (
-      <div className="flex min-h-[40vh] items-center justify-center p-8">
-        <div className="flex flex-col items-center gap-4 text-[#94a3b8]">
-          <svg className="h-8 w-8 animate-spin" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-          <span className="text-sm font-semibold uppercase tracking-widest text-[#636e72]">Loading Academic Settings</span>
-        </div>
-      </div>
-    );
+    return <LoadingSpinner label="Loading Academic Settings" />;
+  }
+
+  function discardChanges() {
+    if (originalThresholdsRef.current) {
+      setLocalThresholds(JSON.parse(originalThresholdsRef.current) as GradingThreshold[]);
+      setDirty(false);
+    }
   }
 
   return (
     <section className="mx-auto max-w-[860px] space-y-8 animate-in fade-in slide-in-from-bottom-3 duration-500 pb-24">
-      <header className="flex flex-col rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-50 text-2xl text-indigo-600 shadow-inner ring-1 ring-indigo-100">
-              🎓
-            </div>
-            <div>
-              <h1 className="text-2xl font-black tracking-tight text-slate-800">Academic Settings</h1>
-              <p className="mt-1 text-sm font-medium text-slate-500">
-                Configure grading scales, thresholds, and academic policies.
-              </p>
-            </div>
-          </div>
+      <PanelHeader
+        gradient
+        icon={<span aria-hidden>🎓</span>}
+        title="Academic Settings"
+        description="Configure grading scales, thresholds, and academic policies."
+        action={
           <button
+            type="button"
             onClick={addRule}
             className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-indigo-200 transition-all hover:bg-indigo-700 hover:shadow-indigo-300"
             title="Define a new grading threshold rule"
           >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
             </svg>
             Add New Rule
           </button>
-        </div>
-      </header>
+        }
+      />
 
       <section>
         <h2 className="mb-4 px-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">Grading Scale Definition</h2>
@@ -158,16 +161,16 @@ export function SettingsAcademicPanel() {
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50/50 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                  <th className="px-6 py-4">Minimum Mark (%)</th>
-                  <th className="px-6 py-4">Letter Grade</th>
-                  <th className="px-6 py-4">Aggregate Value</th>
-                  <th className="px-6 py-4 text-right">Actions</th>
+                  <th scope="col" className="px-6 py-4">Minimum Mark (%)</th>
+                  <th scope="col" className="px-6 py-4">Letter Grade</th>
+                  <th scope="col" className="px-6 py-4">Aggregate Value</th>
+                  <th scope="col" className="px-6 py-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {localThresholds.length > 0 ? (
                   localThresholds.map((rule, idx) => (
-                    <tr key={idx} className="group hover:bg-slate-50 transition-colors">
+                    <tr key={rule.uid} className="group hover:bg-slate-50 transition-colors">
                       <td className="px-6 py-4">
                         <input
                           type="number"
@@ -235,53 +238,17 @@ export function SettingsAcademicPanel() {
         </p>
       </section>
 
-      <div className={`fixed bottom-8 left-1/2 z-50 w-full max-w-lg -translate-x-1/2 px-4 transition-all duration-500 ${dirty ? "translate-y-0 opacity-100" : "translate-y-12 opacity-0 pointer-events-none"}`}>
-        <div className="flex items-center justify-between rounded-3xl border border-indigo-200 bg-indigo-600 p-2 shadow-2xl shadow-indigo-200">
-          <div className="flex items-center gap-3 pl-4">
-            <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-            <span className="text-xs font-bold uppercase tracking-wider text-white">Unsaved Grading Changes</span>
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                if (originalThresholdsRef.current) {
-                  setLocalThresholds(JSON.parse(originalThresholdsRef.current));
-                  setDirty(false);
-                }
-              }}
-              className="rounded-2xl bg-indigo-500/30 px-5 py-2.5 text-xs font-bold text-white hover:bg-indigo-500/50 transition-all"
-              title="Discard all unsaved grading changes"
-            >
-              Discard
-            </button>
-            <button
-              type="button"
-              disabled={saving || localThresholds.length === 0}
-              onClick={onSave}
-              className="rounded-2xl bg-white px-6 py-2.5 text-xs font-bold text-indigo-600 shadow-sm hover:bg-indigo-50 disabled:opacity-50 transition-all"
-              title="Finalize and save the grading system configuration"
-            >
-              {saving ? "Updating..." : "Save System"}
-            </button>
-          </div>
-        </div>
-      </div>
+      <UnsavedBar
+        dirty={dirty}
+        saving={saving}
+        onSave={() => void onSave()}
+        onDiscard={discardChanges}
+        label="Unsaved grading changes"
+        saveLabel="Save System"
+      />
 
       {toast ? (
-        <div className="fixed bottom-24 right-6 z-50 animate-in fade-in slide-in-from-bottom-4">
-          <div className={`flex items-center gap-3 rounded-2xl px-5 py-3 text-sm font-semibold shadow-2xl backdrop-blur-md ${
-            toast.type === "success" ? "bg-emerald-50/90 text-emerald-800 ring-1 ring-emerald-200" : "bg-red-50/90 text-red-800 ring-1 ring-red-200"
-          }`}>
-            <span>{toast.type === "success" ? "✅" : "❌"}</span>
-            <span>{toast.message}</span>
-            <button onClick={() => setToast(null)} className="ml-2 rounded-full p-1 opacity-70 hover:bg-black/5 hover:opacity-100 transition" title="Dismiss this notification">
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        </div>
+        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
       ) : null}
     </section>
   );

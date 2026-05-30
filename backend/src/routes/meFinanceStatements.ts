@@ -3,8 +3,10 @@ import { Op } from "sequelize";
 import { studentToApiRow } from "../formatting/studentRow.js";
 import {
   ClassRoom,
+  FeeCategory,
   Student,
   StudentFeeAssignment,
+  StudentFeeLineItem,
   StudentFeePayment,
   StudentFeeReceipt,
   StudentFeeStructure,
@@ -149,6 +151,22 @@ export function createMeFinanceStatementsRouter() {
         };
       });
 
+      const lineItemRows = await StudentFeeLineItem.findAll({
+        where: { studentId, term, academicYear },
+        include: [{ model: FeeCategory, as: "feeCategory", attributes: ["code", "name"] }],
+        order: [["fee_category_id", "ASC"]],
+      });
+      const lineItems = lineItemRows.map((li) => {
+        const cat = li.get("feeCategory") as FeeCategory | undefined;
+        return {
+          feeCategoryId: li.feeCategoryId,
+          feeCategoryCode: cat?.code ?? "",
+          feeCategoryName: cat?.name ?? "",
+          amountUgx: Number(li.amountUgx) || 0,
+          notes: li.notes ?? null,
+        };
+      });
+
       return res.json({
         item: {
           student: studentToApiRow(student),
@@ -158,6 +176,7 @@ export function createMeFinanceStatementsRouter() {
           totalPaid: summary.totalPaidUgx,
           outstandingAmount: summary.outstandingAmountUgx,
           creditAmount: summary.creditAmountUgx,
+          lineItems,
           transactions,
         },
       });
@@ -220,141 +239,18 @@ export function createMeFinanceStatementsRouter() {
     }
   });
 
-  r.get("/finance/fees/structure", async (req, res) => {
-    try {
-      const term = typeof req.query.term === "string" ? req.query.term.trim() : "";
-      if (!term) return res.status(400).json({ error: "term is required" });
-      const rows = await StudentFeeStructure.findAll({
-        where: { term },
-        order: [["boarding_status", "ASC"]],
-      });
-      const items = rows.map((row) => ({
-        status: row.boardingStatus,
-        label: ((row.get("label") as string | null) ?? "").trim() || row.boardingStatus,
-        amountDueUgx: Number(row.amountDueUgx),
-        notes: row.notes ?? null,
-        isSystem: false,
-      }));
-      return res.json({ items });
-    } catch (err) {
-      console.error(err);
-      return res.status(503).json({ error: "Database unavailable" });
-    }
+  r.get("/finance/fees/structure", async (_req, res) => {
+    return res.status(410).json({
+      error:
+        "Fee structure by boarding status is retired. Configure Student Statuses, Fee Categories, and Fee Rules instead.",
+    });
   });
 
-  r.post("/finance/fees/structure/apply", async (req, res) => {
-    try {
-      const body = req.body as Record<string, unknown>;
-      const term = typeof body.term === "string" ? body.term.trim() : "";
-      if (!term) return res.status(400).json({ error: "term is required" });
-
-      const rawItems = Array.isArray(body.items) ? body.items : [];
-      if (rawItems.length === 0) {
-        return res.status(400).json({ error: "items are required" });
-      }
-
-      const parsedItems: Array<{ status: string; label: string | null; amountDueUgx: number; notes: string | null }> = [];
-      for (const raw of rawItems) {
-        const item = raw as Record<string, unknown>;
-        const status = normalizeAnyStatus(item.status);
-        const amountDueUgx = parseAmountUgx(item.amountDueUgx);
-        const notes = typeof item.notes === "string" ? item.notes.trim().slice(0, 255) : null;
-        const label = typeof item.label === "string" ? item.label.trim().slice(0, 120) : null;
-        if (!status) {
-          return res.status(400).json({ error: "Invalid student status in items" });
-        }
-        if (amountDueUgx == null) {
-          return res.status(400).json({ error: "Invalid amountDueUgx in items" });
-        }
-        parsedItems.push({ status, label, amountDueUgx, notes });
-      }
-
-      const uniqueByStatus = new Map<string, { label: string | null; amountDueUgx: number; notes: string | null }>();
-      for (const item of parsedItems) {
-        uniqueByStatus.set(item.status, { label: item.label, amountDueUgx: item.amountDueUgx, notes: item.notes });
-      }
-
-      // Remove custom entities from DB that are no longer in the payload
-      const deleteStatuses = typeof body.deleteStatuses === "string" ? body.deleteStatuses.split(",").map((s: string) => s.trim()).filter(Boolean) : [];
-
-      const txn = await StudentFeeStructure.sequelize!.transaction();
-      let updatedAssignments = 0;
-      const { academicYear } = await loadOfficialSchoolTermYear();
-      try {
-        for (const delStatus of deleteStatuses) {
-          await StudentFeeStructure.destroy({
-            where: { term, boardingStatus: delStatus },
-            transaction: txn,
-          });
-        }
-
-        // Load all students once instead of re-querying per status; without the
-        // include we cannot compute the effective fee status from boarding+class.
-        const allStudents = await Student.findAll({
-          attributes: ["id", "boardingStatus"],
-          include: [{ model: ClassRoom, as: "classRoom", required: false, attributes: ["name"] }],
-          transaction: txn,
-        });
-
-        const studentsByEffectiveStatus = new Map<BoardingStatus, Array<{ id: number }>>();
-        for (const stu of allStudents) {
-          const stBoarding = normalizeStudentBoardingStatus(stu.boardingStatus);
-          const stClassName = studentClassName(stu);
-          const stStatus = toFeeStructureStatus(stBoarding, stClassName);
-          if (!stStatus) continue;
-          const list = studentsByEffectiveStatus.get(stStatus) ?? [];
-          list.push({ id: stu.id });
-          studentsByEffectiveStatus.set(stStatus, list);
-        }
-
-        for (const [status, item] of uniqueByStatus.entries()) {
-          await StudentFeeStructure.upsert(
-            {
-              term,
-              boardingStatus: status,
-              amountDueUgx: item.amountDueUgx,
-              notes: item.notes,
-              label: item.label,
-            } as any,
-            { transaction: txn },
-          );
-
-          // Only auto-assign students for the 4 built-in boarding statuses
-          const boardingStatus = normalizeBoardingStatus(status);
-          if (!boardingStatus) continue;
-
-          const targets = studentsByEffectiveStatus.get(boardingStatus) ?? [];
-          if (targets.length === 0) continue;
-
-          const rows = targets.map((stu) => ({
-            studentId: stu.id,
-            term,
-            academicYear,
-            amountDueUgx: item.amountDueUgx,
-            notes: item.notes,
-          }));
-          await StudentFeeAssignment.bulkCreate(rows as any, {
-            updateOnDuplicate: ["amountDueUgx", "notes"],
-            transaction: txn,
-          });
-          updatedAssignments += targets.length;
-        }
-        await txn.commit();
-      } catch (e) {
-        await txn.rollback();
-        throw e;
-      }
-
-      return res.status(201).json({
-        ok: true,
-        term,
-        statusesApplied: uniqueByStatus.size,
-        updatedAssignments,
-      });
-    } catch (err) {
-      console.error(err);
-      return res.status(503).json({ error: "Database unavailable" });
-    }
+  r.post("/finance/fees/structure/apply", async (_req, res) => {
+    return res.status(410).json({
+      error:
+        "Bulk apply by boarding status is retired. Generate fee line items from fee rules per student status.",
+    });
   });
 
   r.get("/finance/fees/assignments", async (req, res) => {

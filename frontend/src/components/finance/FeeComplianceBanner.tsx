@@ -49,7 +49,11 @@ export function FeeComplianceBanner() {
 
   const preview = data.items.slice(0, 12);
   const reasonLabel = (r: FeeComplianceIssueRow["reason"]) =>
-    r === "missing_assignment" ? "No assignment" : "UGX 0";
+    r === "missing_status"
+      ? "No student status"
+      : r === "missing_assignment"
+        ? "No assignment"
+        : "UGX 0";
 
   return (
     <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm shadow-sm">

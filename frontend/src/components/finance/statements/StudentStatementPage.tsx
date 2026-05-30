@@ -57,6 +57,25 @@ export function StudentStatementPage({ statement }: { statement: StudentStatemen
           </div>
         </div>
 
+        {statement.lineItems && statement.lineItems.length > 0 ? (
+          <div className={`mt-8 overflow-hidden rounded-[2rem] border ${isDarkUi ? "border-slate-800" : "border-slate-100 shadow-sm"}`}>
+            <div className={`px-8 py-4 text-[10px] font-black uppercase tracking-[0.2em] border-b ${isDarkUi ? "bg-slate-800/50 text-slate-400 border-slate-700" : "bg-slate-50 text-slate-500 border-slate-100"}`}>
+              Fee breakdown by category
+            </div>
+            <table className="w-full text-sm">
+              <tbody>
+                {statement.lineItems.map((li) => (
+                  <tr key={li.feeCategoryId} className={`border-b ${isDarkUi ? "border-slate-800" : "border-slate-100"}`}>
+                    <td className="px-8 py-2 font-medium">{li.feeCategoryName}</td>
+                    <td className="px-8 py-2 text-right font-mono text-xs text-slate-500">{li.feeCategoryCode}</td>
+                    <td className="px-8 py-2 text-right font-bold">{formatCurrencyUGX(li.amountUgx)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
         {/* Financial Dashboard */}
         <div className="mt-8 grid gap-4 sm:grid-cols-4">
           <SummaryCard label="Assigned Fees" value={formatCurrencyUGX(statement.assignedAmount)} type="base" isDarkUi={isDarkUi} />

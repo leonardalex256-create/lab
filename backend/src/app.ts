@@ -31,6 +31,10 @@ import { createMeAttendanceRouter } from "./routes/meAttendance.js";
 import { createMeResultsRouter } from "./routes/meResults.js";
 import { createMeAuditLogRouter } from "./routes/meAuditLog.js";
 import { createMeUploadRouter } from "./routes/meUpload.js";
+import { createMeStudentStatusesRouter } from "./routes/meStudentStatuses.js";
+import { createMeFeeCategoriesRouter } from "./routes/meFeeCategories.js";
+import { createMeFeeRulesRouter } from "./routes/meFeeRules.js";
+import { createMeStudentFeesRouter } from "./routes/meStudentFees.js";
 import { createForgotPasswordRouter } from "./routes/forgotPassword.js";
 
 export function buildApp(config: Config) {
@@ -123,6 +127,10 @@ export function buildApp(config: Config) {
   meRouter.use(createMeExpensesRouter());
   meRouter.use(createMeGeoRouter());
   meRouter.use(createMeStudentsRouter());
+  meRouter.use(createMeStudentStatusesRouter());
+  meRouter.use(createMeFeeCategoriesRouter());
+  meRouter.use(createMeFeeRulesRouter());
+  meRouter.use(createMeStudentFeesRouter());
   meRouter.use(createMeStaffRouter());
   meRouter.use(createMeParentsRouter());
   meRouter.use(createMeAttendanceRouter());

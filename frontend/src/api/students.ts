@@ -71,6 +71,9 @@ export type StudentApiRow = {
   religion: string | null;
   specialNeeds: string | null;
   boardingStatus: string | null;
+  studentStatusId: number | null;
+  studentStatusCode: string | null;
+  studentStatusName: string | null;
   residenceAddress: string | null;
   medicalInfo: string | null;
   emergencyContactName: string | null;
@@ -128,6 +131,12 @@ export async function fetchStudents(opts: StudentListQueryInput): Promise<{ item
     opts.boardingStatus === "day_full"
   ) {
     p.set("boardingStatus", opts.boardingStatus);
+  }
+  if (opts.missingStatus === true) {
+    p.set("missingStatus", "true");
+  }
+  if (opts.studentStatusId != null) {
+    p.set("studentStatusId", String(opts.studentStatusId));
   }
   if (opts.limit != null) p.set("limit", String(opts.limit));
   if (opts.offset != null) p.set("offset", String(opts.offset));

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { AdmissionImportTable } from "./AdmissionImportTable";
-import { NewAdmissionForm } from "./NewAdmissionForm";
+import { StudentRegistrationWizard } from "./StudentRegistrationWizard";
+import { LegacyStatusBanner } from "./LegacyStatusBanner";
+import { fetchStudentStatusCount } from "../../api/studentStatuses";
 import { ParentsSectionPage } from "./ParentsSectionPage";
 import { StudentsListPanel } from "./StudentsListPanel";
 import { fetchStudents, type StudentApiRow } from "../../api/students";
@@ -30,6 +32,13 @@ export function StudentsSectionPage({
   const [listRefresh, setListRefresh] = useState(0);
   const [overviewRows, setOverviewRows] = useState<StudentApiRow[]>([]);
   const [overviewLoading, setOverviewLoading] = useState(false);
+  const [statusCount, setStatusCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    void fetchStudentStatusCount()
+      .then(setStatusCount)
+      .catch(() => setStatusCount(null));
+  }, []);
 
   useEffect(() => {
     if (section !== "overview") return;
@@ -244,8 +253,15 @@ export function StudentsSectionPage({
 
   return (
     <div className="min-w-0 space-y-6">
+      <LegacyStatusBanner />
       {section === "admissions" ? (
-        <NewAdmissionForm onCreated={() => setListRefresh((k) => k + 1)} />
+        statusCount === 0 ? (
+          <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+            Complete the Student Status setup wizard before registering students.
+          </p>
+        ) : (
+          <StudentRegistrationWizard onCreated={() => setListRefresh((k) => k + 1)} />
+        )
       ) : section === "import" ? (
         <AdmissionImportTable onDone={() => setListRefresh((k) => k + 1)} />
       ) : section === "parents" ? (

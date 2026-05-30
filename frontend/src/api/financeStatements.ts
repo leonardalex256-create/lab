@@ -32,7 +32,7 @@ export type FeeComplianceIssueRow = {
   fullName: string;
   className: string | null;
   term: string;
-  reason: "missing_assignment" | "zero_amount";
+  reason: "missing_status" | "missing_assignment" | "zero_amount";
 };
 
 export async function fetchFeeComplianceViolations(

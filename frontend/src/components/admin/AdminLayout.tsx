@@ -6,7 +6,9 @@ import {
   requestTwoFactorOtp,
 } from "../../api/account";
 import { fetchExamTypeConfigs, type ExamTypeConfigRow } from "../../api/academics";
+import { fetchRecordsSearch, type RecordsSearchPayload } from "../../api/recordsSearch";
 import { fetchGeneralSettings } from "../../api/settingsGeneral";
+import { useTermContext } from "../../context/TermContext";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localeLabels, type Locale } from "../../i18n/messages";
 import { useTheme } from "../../theme/ThemeProvider";
@@ -549,8 +551,8 @@ function buildNavGroups(
         { icon: IconSunMoon, label: t("nav.settings.modes"), settingsPanel: "modes", requiredPermission: "settings_modes" },
         {
           icon: IconWallet,
-          label: t("nav.settings.feesStructure"),
-          settingsPanel: "fees_structure",
+          label: t("nav.settings.feesSettingsStructure"),
+          settingsPanel: "fees_settings_structure",
           requiredPermission: "settings_fees_structure",
         },
         {
@@ -684,6 +686,7 @@ export function AdminLayout({
 }: AdminLayoutProps) {
   const { t, locale, setLocale } = useI18n();
   const { resolvedTheme, density } = useTheme();
+  const { viewingTerm, viewingAcademicYear } = useTermContext();
   const [sectionsStreamsEnabled, setSectionsStreamsEnabled] = useState(true);
   const navGroups = useMemo(
     () =>
@@ -707,6 +710,13 @@ export function AdminLayout({
   const [msgPanelOpen, setMsgPanelOpen] = useState(false);
   const [curriculumExamTypes, setCurriculumExamTypes] = useState<ExamTypeConfigRow[]>([]);
 
+  const [globalSearchQ, setGlobalSearchQ] = useState("");
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
+  const [globalSearchError, setGlobalSearchError] = useState<string | null>(null);
+  const [globalSearchData, setGlobalSearchData] = useState<RecordsSearchPayload | null>(null);
+  const globalSearchWrapRef = useRef<HTMLDivElement>(null);
+
   const [pwOtpSent, setPwOtpSent] = useState(false);
   const [pwBusy, setPwBusy] = useState(false);
   const [pwErr, setPwErr] = useState<string | null>(null);
@@ -728,6 +738,95 @@ export function AdminLayout({
 
   const unreadNotifCount = headerNotifications.filter((n) => !n.read).length;
   const unreadMsgCount = headerMessages.filter((m) => !m.read).length;
+
+  const globalSearchTotals = useMemo(() => {
+    const d = globalSearchData;
+    if (!d) return { total: 0, finance: 0, academics: 0 };
+    const finance =
+      d.finance.assignments.length + d.finance.payments.length + d.finance.receipts.length;
+    const academics = d.academics.results.length;
+    return { total: finance + academics, finance, academics };
+  }, [globalSearchData]);
+
+  useEffect(() => {
+    if (!globalSearchOpen) return;
+    function handlePointerDown(e: PointerEvent) {
+      if (
+        globalSearchWrapRef.current &&
+        !globalSearchWrapRef.current.contains(e.target as Node)
+      ) {
+        setGlobalSearchOpen(false);
+      }
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setGlobalSearchOpen(false);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [globalSearchOpen]);
+
+  useEffect(() => {
+    const q = globalSearchQ.trim();
+    if (!globalSearchOpen) return;
+    if (q.length < 2) {
+      setGlobalSearchLoading(false);
+      setGlobalSearchError(null);
+      setGlobalSearchData(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setGlobalSearchLoading(true);
+      setGlobalSearchError(null);
+      void fetchRecordsSearch({
+        term: viewingTerm,
+        academicYear: viewingAcademicYear,
+        q,
+        limit: 14,
+      })
+        .then((res) => {
+          if (cancelled) return;
+          setGlobalSearchData(res);
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setGlobalSearchError(e instanceof Error ? e.message : t("inbox.loadError"));
+          setGlobalSearchData(null);
+        })
+        .finally(() => {
+          if (cancelled) return;
+          setGlobalSearchLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [globalSearchQ, globalSearchOpen, viewingTerm, viewingAcademicYear, t]);
+
+  function openStudentFromSearch(studentId: number) {
+    try {
+      sessionStorage.setItem("globalSearch.openStudentId", String(studentId));
+    } catch {
+      /* ignore */
+    }
+    onSelectStudentSection?.("profiles");
+    setGlobalSearchOpen(false);
+  }
+
+  function openReceiptFromSearch(receiptId: number) {
+    try {
+      sessionStorage.setItem("globalSearch.openReceiptId", String(receiptId));
+    } catch {
+      /* ignore */
+    }
+    onSelectFinanceSection?.("receipts");
+    setGlobalSearchOpen(false);
+  }
 
   const name = useMemo(() => {
     const email = user?.email ?? null;
@@ -1233,7 +1332,7 @@ export function AdminLayout({
             >
               <MenuIcon />
             </button>
-            <div className="hidden min-w-0 max-w-md flex-1 md:block lg:max-w-xl">
+            <div className="hidden min-w-0 max-w-md flex-1 md:block lg:max-w-xl" ref={globalSearchWrapRef}>
               <label className="relative block">
                 <span className="sr-only">{t("layout.search")}</span>
                 <IconSearch className="pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-[#636e72]" />
@@ -1241,8 +1340,177 @@ export function AdminLayout({
                   type="search"
                   placeholder={t("layout.searchPlaceholder")}
                   className="neo-inset w-full py-2 pl-9 pr-3 text-xs text-[#2d3436] outline-none transition placeholder:text-[#636e72]/80 focus:ring-2 focus:ring-[#b9d9eb]/60"
+                  value={globalSearchQ}
+                  onChange={(e) => {
+                    setGlobalSearchQ(e.target.value);
+                    if (!globalSearchOpen) setGlobalSearchOpen(true);
+                  }}
+                  onFocus={() => setGlobalSearchOpen(true)}
                 />
               </label>
+
+              {globalSearchOpen ? (
+                <div className="neo-dropdown absolute left-0 right-0 top-full z-[80] mt-2 overflow-hidden py-2">
+                  <div className="flex items-center justify-between gap-2 px-3 pb-2 text-[10px] font-bold uppercase tracking-widest text-[#636e72]">
+                    <span>
+                      {viewingTerm} · {viewingAcademicYear}
+                    </span>
+                    <span>
+                      {globalSearchTotals.total > 0 ? `${globalSearchTotals.total} results` : ""}
+                    </span>
+                  </div>
+
+                  {globalSearchError ? (
+                    <div className="px-3 pb-2 text-xs font-semibold text-[#c0392b]" role="alert">
+                      {globalSearchError}
+                    </div>
+                  ) : null}
+
+                  {globalSearchLoading && !globalSearchData ? (
+                    <div className="px-3 py-2 text-xs font-semibold text-[#636e72]">Searching…</div>
+                  ) : null}
+
+                  {!globalSearchLoading && globalSearchQ.trim().length < 2 ? (
+                    <div className="px-3 py-2 text-xs font-semibold text-[#636e72]">
+                      Type at least 2 characters to search.
+                    </div>
+                  ) : null}
+
+                  {globalSearchData && globalSearchTotals.total === 0 ? (
+                    <div className="px-3 py-2 text-xs font-semibold text-[#636e72]">No results found.</div>
+                  ) : null}
+
+                  {globalSearchData ? (
+                    <div className="max-h-[60vh] overflow-auto">
+                      {globalSearchTotals.finance > 0 ? (
+                        <div className="px-3 pt-2 text-[10px] font-black uppercase tracking-widest text-[#2d3436]">
+                          Finance
+                        </div>
+                      ) : null}
+
+                      {globalSearchData.finance.receipts.slice(0, 6).map((x) => (
+                        <button
+                          key={`receipt:${x.id}`}
+                          type="button"
+                          className="flex w-full items-start gap-2 px-3 py-2 text-left text-xs hover:bg-[#b9d9eb]/25"
+                          onClick={() => openReceiptFromSearch(x.id)}
+                          title={`Open receipt ${x.receiptNo}`}
+                        >
+                          <span className="mt-[1px] shrink-0 rounded bg-[#cde8cf]/60 px-1.5 py-0.5 text-[9px] font-black text-[#2d3436]">
+                            Receipt
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="font-bold text-[#2d3436]">{x.receiptNo}</span>
+                            <span className="text-[#636e72]">
+                              {" "}
+                              · {x.studentName} · UGX {x.amountPaidUgx.toLocaleString()}
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+
+                      {globalSearchData.finance.payments.slice(0, 4).map((x) => (
+                        <button
+                          key={`payment:${x.id}`}
+                          type="button"
+                          className="flex w-full items-start gap-2 px-3 py-2 text-left text-xs hover:bg-[#b9d9eb]/25"
+                          onClick={() => {
+                            if (x.receiptId) {
+                              openReceiptFromSearch(x.receiptId);
+                              return;
+                            }
+                            openStudentFromSearch(x.studentId);
+                          }}
+                          title={x.receiptId ? "Open receipt" : "Open student"}
+                        >
+                          <span className="mt-[1px] shrink-0 rounded bg-[#b9d9eb]/60 px-1.5 py-0.5 text-[9px] font-black text-[#2d3436]">
+                            Payment
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="font-bold text-[#2d3436]">{x.studentName}</span>
+                            <span className="text-[#636e72]">
+                              {" "}
+                              · UGX {x.amountPaidUgx.toLocaleString()} · {x.paymentMethod}
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+
+                      {globalSearchData.finance.assignments.slice(0, 4).map((x) => (
+                        <button
+                          key={`assignment:${x.id}`}
+                          type="button"
+                          className="flex w-full items-start gap-2 px-3 py-2 text-left text-xs hover:bg-[#b9d9eb]/25"
+                          onClick={() => openStudentFromSearch(x.studentId)}
+                          title="Open student"
+                        >
+                          <span className="mt-[1px] shrink-0 rounded bg-[#f7d1cd]/60 px-1.5 py-0.5 text-[9px] font-black text-[#2d3436]">
+                            Fees
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="font-bold text-[#2d3436]">{x.studentName}</span>
+                            <span className="text-[#636e72]">
+                              {" "}
+                              · {x.admissionNumber ?? "—"} · UGX {x.amountDueUgx.toLocaleString()}
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+
+                      {globalSearchTotals.academics > 0 ? (
+                        <div className="px-3 pt-3 text-[10px] font-black uppercase tracking-widest text-[#2d3436]">
+                          Academics
+                        </div>
+                      ) : null}
+
+                      {globalSearchData.academics.results.slice(0, 6).map((x) => (
+                        <button
+                          key={`result:${x.id}`}
+                          type="button"
+                          className="flex w-full items-start gap-2 px-3 py-2 text-left text-xs hover:bg-[#b9d9eb]/25"
+                          onClick={() => {
+                            openStudentFromSearch(x.studentId);
+                            onSelectCurriculumSection?.("result_entry");
+                          }}
+                          title="Open student"
+                        >
+                          <span className="mt-[1px] shrink-0 rounded bg-[#ebe4d9]/80 px-1.5 py-0.5 text-[9px] font-black text-[#2d3436]">
+                            Result
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="font-bold text-[#2d3436]">{x.studentName}</span>
+                            <span className="text-[#636e72]">
+                              {" "}
+                              · {x.className ?? "Class"} · {x.examType} · {x.subject}: {x.score}
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <div className="mt-1 flex items-center justify-between gap-2 border-t border-white/40 px-3 pt-2">
+                    <button
+                      type="button"
+                      className="text-[11px] font-bold text-[#5a8faf] hover:underline"
+                      onClick={() => {
+                        setGlobalSearchQ("");
+                        setGlobalSearchData(null);
+                        setGlobalSearchError(null);
+                      }}
+                    >
+                      Clear
+                    </button>
+                    <button
+                      type="button"
+                      className="text-[11px] font-bold text-[#636e72] hover:underline"
+                      onClick={() => setGlobalSearchOpen(false)}
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
             <div className="hidden min-w-0 flex-1 flex-col items-center justify-center px-1 lg:flex">
               <p className="truncate text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[#b8682a] sm:text-[11px]">
@@ -1870,7 +2138,7 @@ export function AdminLayout({
           </div>
         </header>
 
-        <div className="relative min-h-0 flex-1 overflow-hidden">
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           <div
             aria-hidden="true"
             className="pointer-events-none absolute inset-0 bg-center bg-no-repeat"
@@ -1880,7 +2148,9 @@ export function AdminLayout({
               opacity: 0.06,
             }}
           />
-          <div className="relative z-10 min-h-0 flex-1">{children}</div>
+          <div className="relative z-10 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain">
+            {children}
+          </div>
         </div>
 
         <footer className="neo-footer shrink-0 border-t border-white/40 py-3.5 text-center text-xs font-medium text-[#636e72]">

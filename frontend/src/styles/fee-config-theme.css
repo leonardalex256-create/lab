@@ -1,0 +1,36 @@
+.fee-config-theme {
+  --fee-navy: #0f1b35;
+  --fee-slate: #1e293b;
+  --fee-panel: #f8fafc;
+  --fee-amber: #f59e0b;
+  --fee-mono: "IBM Plex Mono", ui-monospace, monospace;
+  color: var(--fee-navy);
+  font-family: system-ui, sans-serif;
+}
+
+.fee-config-theme .fee-panel {
+  background: var(--fee-panel);
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 1.25rem;
+}
+
+.fee-config-theme .fee-btn-primary {
+  background: var(--fee-amber);
+  color: #0f172a;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.fee-config-theme .fee-code {
+  font-family: var(--fee-mono);
+  font-size: 0.85rem;
+}
+
+.fee-config-theme h1,
+.fee-config-theme h2 {
+  color: var(--fee-navy);
+}

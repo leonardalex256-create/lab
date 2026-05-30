@@ -37,6 +37,9 @@ export type StudentApiRow = {
   religion: string | null;
   specialNeeds: string | null;
   boardingStatus: string | null;
+  studentStatusId: number | null;
+  studentStatusCode: string | null;
+  studentStatusName: string | null;
   residenceAddress: string | null;
   medicalInfo: string | null;
   emergencyContactName: string | null;
@@ -144,6 +147,18 @@ export function studentToApiRow(s: Student): StudentApiRow {
       (s.get("boarding_status") as string | null | undefined) ??
       (s as unknown as { boardingStatus?: string | null }).boardingStatus ??
       null,
+    studentStatusId:
+      s.studentStatusId ??
+      (s.get("student_status_id") as number | null | undefined) ??
+      null,
+    studentStatusCode:
+      ((s.get("studentStatus") as { code?: string } | null | undefined)?.code as
+        | string
+        | undefined) ?? null,
+    studentStatusName:
+      ((s.get("studentStatus") as { name?: string } | null | undefined)?.name as
+        | string
+        | undefined) ?? null,
     residenceAddress:
       (s.get("residence_address") as string | null | undefined) ??
       (s as unknown as { residenceAddress?: string | null }).residenceAddress ??

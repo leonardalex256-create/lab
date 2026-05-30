@@ -21,6 +21,7 @@ import {
   type ClassRoomOption,
   type StaffMemberApiRow,
 } from "../../api/students";
+import { ConfirmModal } from "./shared";
 import {
   groupAvailableKeysBySector,
   orphanPermissionKeys,
@@ -96,6 +97,8 @@ function mergeManagedUserRow(prev: ManagedUser, next: ManagedUser): ManagedUser 
   };
 }
 
+const USERS_PAGE_SIZE = 100;
+
 export function SettingsUsersRolesPanel() {
   const [view, setView] = useState<"list" | "add" | "permissions">("list");
   const [permissionMode, setPermissionMode] = useState<"role" | "user">("role");
@@ -125,7 +128,6 @@ export function SettingsUsersRolesPanel() {
   const [roleFilter, setRoleFilter] = useState("all");
   const [totalUsers, setTotalUsers] = useState(0);
   const [offset, setOffset] = useState(0);
-  const USERS_PAGE_SIZE = 100;
   const [status, setStatus] = useState<string | null>(null);
   const [classrooms, setClassrooms] = useState<ClassRoomOption[]>([]);
   const [staffMembers, setStaffMembers] = useState<StaffMemberApiRow[]>([]);
@@ -336,8 +338,8 @@ export function SettingsUsersRolesPanel() {
       setStatus("Permissions updated successfully!");
       lastFetchedPermissionMappingsRef.current = permissionMappings;
       setDirtyKeys(new Set());
-    } catch (err: any) {
-      setStatus("Error saving permissions: " + err.message);
+    } catch (err: unknown) {
+      setStatus("Error saving permissions: " + (err instanceof Error ? err.message : String(err)));
     } finally {
       setIsSaving(false);
     }
@@ -389,8 +391,8 @@ export function SettingsUsersRolesPanel() {
       }));
       await updateUserPermissionOverrides(selectedPermissionUserId, overrides);
       setStatus("User permissions updated successfully!");
-    } catch (err: any) {
-      setStatus("Error saving user permissions: " + err.message);
+    } catch (err: unknown) {
+      setStatus("Error saving user permissions: " + (err instanceof Error ? err.message : String(err)));
     } finally {
       setIsSaving(false);
     }
@@ -453,8 +455,8 @@ export function SettingsUsersRolesPanel() {
       setLinkedStaffMemberId(null);
       setEditingUserId(null);
       setView("list");
-    } catch (err: any) {
-      setStatus(err?.message ?? "Failed to create user");
+    } catch (err: unknown) {
+      setStatus(err instanceof Error ? err.message : "Failed to create user");
     } finally {
       setIsSubmitting(false);
     }
@@ -496,8 +498,8 @@ export function SettingsUsersRolesPanel() {
           ? `${updated.name} has been reactivated.`
           : `${updated.name} has been deactivated.`,
       );
-    } catch (err: any) {
-      setStatus(err?.message ?? "Failed to update user status");
+    } catch (err: unknown) {
+      setStatus(err instanceof Error ? err.message : "Failed to update user status");
     } finally {
       setActingUserId(null);
     }
@@ -516,8 +518,8 @@ export function SettingsUsersRolesPanel() {
       await deleteManagedUser(user.id);
       setUsers((current) => current.filter((row) => row.id !== user.id));
       setStatus(`${user.name} was deleted successfully.`);
-    } catch (err: any) {
-      setStatus(err?.message ?? "Failed to delete user");
+    } catch (err: unknown) {
+      setStatus(err instanceof Error ? err.message : "Failed to delete user");
     } finally {
       setActingUserId(null);
       setDeleteUserModal({ open: false, user: null });
@@ -542,8 +544,8 @@ export function SettingsUsersRolesPanel() {
       setActingUserId(user.id);
       await adminResetManagedUserPassword(user.id, newPassword);
       setStatus(`Password reset completed for ${user.name}. Share the temporary password securely.`);
-    } catch (err: any) {
-      setStatus(err?.message ?? "Failed to reset password");
+    } catch (err: unknown) {
+      setStatus(err instanceof Error ? err.message : "Failed to reset password");
     } finally {
       setActingUserId(null);
       setResetPasswordModal({ open: false, user: null });
@@ -1796,74 +1798,38 @@ export function SettingsUsersRolesPanel() {
           </div>
         ) : null}
 
-        {deleteUserModal.open && deleteUserModal.user ? (
-          <div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[2px]"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="delete-user-title"
-            onClick={() => (actingUserId ? null : setDeleteUserModal({ open: false, user: null }))}
-          >
-            <div
-              className="w-full max-w-lg overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="border-b border-slate-100 bg-slate-50 px-6 py-4">
-                <h2 id="delete-user-title" className="text-lg font-black text-[#0c2340]">
-                  Confirm delete
-                </h2>
-                <p className="mt-1 text-sm font-medium text-slate-600">
-                  Delete <span className="font-bold text-slate-800">{deleteUserModal.user.name}</span>{" "}
-                  <span className="rounded-lg border border-indigo-100 bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-indigo-600">
-                    {deleteUserModal.user.role}
-                  </span>
-                  ? This action archives the account and removes it from active users.
-                </p>
-              </div>
-              <div className="flex gap-3 border-t border-slate-100 bg-slate-50/80 px-6 py-4">
-                <button
-                  type="button"
-                  disabled={actingUserId === deleteUserModal.user.id}
-                  onClick={() => setDeleteUserModal({ open: false, user: null })}
-                  className="flex-1 rounded-xl border border-slate-200 bg-white py-3 text-sm font-bold text-slate-600 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={actingUserId === deleteUserModal.user.id}
-                  onClick={() => void confirmDeleteUser()}
-                  className="flex-1 rounded-xl bg-rose-600 py-3 text-sm font-bold text-white shadow-lg shadow-rose-200 transition-all hover:bg-rose-700 disabled:opacity-50"
-                >
-                  Confirm Delete
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : null}
+        <ConfirmModal
+          open={deleteUserModal.open && deleteUserModal.user != null}
+          title="Confirm delete"
+          description={
+            deleteUserModal.user ? (
+              <span>
+                Delete{" "}
+                <span className="font-bold text-slate-800">{deleteUserModal.user.name}</span>{" "}
+                <span className="rounded-lg border border-indigo-100 bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-indigo-600">
+                  {deleteUserModal.user.role}
+                </span>
+                ? This action archives the account and removes it from active users.
+              </span>
+            ) : null
+          }
+          confirmLabel="Confirm Delete"
+          variant="danger"
+          loading={actingUserId === deleteUserModal.user?.id}
+          onConfirm={() => void confirmDeleteUser()}
+          onClose={() => setDeleteUserModal({ open: false, user: null })}
+        />
 
-        {resetPasswordModal.open && resetPasswordModal.user ? (
-          <div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[2px]"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="reset-password-title"
-            onClick={() => (actingUserId ? null : setResetPasswordModal({ open: false, user: null }))}
-          >
-            <div
-              className="w-full max-w-lg overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="border-b border-slate-100 bg-slate-50 px-6 py-4">
-                <h2 id="reset-password-title" className="text-lg font-black text-[#0c2340]">
-                  Force password reset
-                </h2>
-                <p className="mt-1 text-sm font-medium text-slate-600">
+        <ConfirmModal
+          open={resetPasswordModal.open && resetPasswordModal.user != null}
+          title="Force password reset"
+          description={
+            resetPasswordModal.user ? (
+              <div className="space-y-4">
+                <p>
                   Set a temporary strong password for{" "}
                   <span className="font-bold text-slate-800">{resetPasswordModal.user.name}</span>.
                 </p>
-              </div>
-              <div className="px-6 py-4 space-y-4">
                 <label className="block space-y-2">
                   <span className="text-xs font-bold text-slate-700">Temporary password</span>
                   <input
@@ -1881,27 +1847,13 @@ export function SettingsUsersRolesPanel() {
                   <PasswordRule ok={resetPasswordChecks.symbol} label="Symbol" />
                 </div>
               </div>
-              <div className="flex gap-3 border-t border-slate-100 bg-slate-50/80 px-6 py-4">
-                <button
-                  type="button"
-                  disabled={actingUserId === resetPasswordModal.user.id}
-                  onClick={() => setResetPasswordModal({ open: false, user: null })}
-                  className="flex-1 rounded-xl border border-slate-200 bg-white py-3 text-sm font-bold text-slate-600 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={actingUserId === resetPasswordModal.user.id || !resetPasswordChecks.isStrong}
-                  onClick={() => void confirmAdminResetPassword()}
-                  className="flex-1 rounded-xl bg-indigo-600 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-200 transition-all hover:bg-indigo-700 disabled:opacity-50"
-                >
-                  Reset Password
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : null}
+            ) : null
+          }
+          confirmLabel="Reset Password"
+          loading={actingUserId === resetPasswordModal.user?.id}
+          onConfirm={() => void confirmAdminResetPassword()}
+          onClose={() => { setResetPasswordModal({ open: false, user: null }); setResetPasswordInput(""); }}
+        />
       </div>
     </div>
   );

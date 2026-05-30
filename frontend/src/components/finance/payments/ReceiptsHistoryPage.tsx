@@ -65,6 +65,21 @@ export function ReceiptsHistoryPage({ generatedByName }: { generatedByName?: str
     void loadRows();
   }, [loadRows]);
 
+   useEffect(() => {
+    // If the header global search asked to open a specific receipt, do it once on mount.
+    try {
+      const raw = sessionStorage.getItem("globalSearch.openReceiptId");
+      if (!raw) return;
+      const id = Number(raw);
+      if (!Number.isFinite(id) || id <= 0) return;
+      sessionStorage.removeItem("globalSearch.openReceiptId");
+      void openReceipt(id, false);
+    } catch {
+      /* ignore */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     setPage(1);
   }, [viewingTerm, viewingAcademicYear]);

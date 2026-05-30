@@ -14,6 +14,7 @@ import {
   type StaffMemberApiRow,
 } from "../../api/students";
 import { useTheme } from "../../theme/ThemeProvider";
+import { Toast } from "./shared";
 
 export function SettingsClassStructurePanel() {
   const { resolvedTheme } = useTheme();
@@ -874,24 +875,13 @@ export function SettingsClassStructurePanel() {
         </Modal>
       )}
 
-      {/* Toast Notifications */}
-      {toast && (
-        <div className="fixed bottom-24 right-8 z-50 animate-in fade-in slide-in-from-right-8">
-          <div className={`flex items-center gap-3 rounded-2xl px-6 py-4 text-sm font-bold shadow-2xl backdrop-blur-md ${
-            toast.type === "success" 
-              ? "bg-emerald-500 text-white" 
-              : "bg-rose-500 text-white"
-          }`}>
-            <span>{toast.type === "success" ? "✅" : "❌"}</span>
-            <span>{toast.text}</span>
-            <button onClick={() => setToast(null)} className="ml-2 rounded-full p-1 hover:bg-black/10">
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      )}
+      {toast ? (
+        <Toast
+          message={toast.text}
+          type={toast.type}
+          onClose={() => setToast(null)}
+        />
+      ) : null}
     </section>
   );
 }

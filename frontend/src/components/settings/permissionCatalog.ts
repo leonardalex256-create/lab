@@ -332,7 +332,8 @@ export const PERMISSION_DETAILS: Record<
   },
   settings_fees_structure: {
     title: "Settings - fees structure",
-    description: "Access fees structure settings.",
+    description:
+      "Access Fees Settings & Structure: student statuses, fee categories, and fee rules.",
   },
   settings_general: {
     title: "Settings - general",

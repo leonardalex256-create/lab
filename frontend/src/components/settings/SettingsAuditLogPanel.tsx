@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { Fragment, useState, useEffect, useRef } from "react";
 import { apiUrl, authHeaders } from "../../api/baseUrl";
+import { PanelHeader, LoadingSpinner } from "./shared";
 
 interface AuditLogRow {
   id: number;
@@ -71,30 +72,37 @@ export function SettingsAuditLogPanel() {
   const [availableActions, setAvailableActions] = useState<string[]>([]);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const load = useCallback(async (p = 1) => {
-    setLoading(true);
-    const params = new URLSearchParams({ page: String(p), limit: "50" });
-    for (const [k, v] of Object.entries(filters)) {
-      if (v) params.set(k, v);
-    }
-    try {
-      const res = await fetch(apiUrl(`/api/me/settings/audit-log?${params}`), { headers: authHeaders() });
-      const json = await res.json();
-      if (json.success) {
-        setRows(json.data ?? []);
-        setMeta(json.meta ?? { page: 1, limit: 50, total: 0, pages: 1 });
-        if (json.filters?.actions?.length) {
-          setAvailableActions((json.filters.actions as Array<{ action: string }>).map((a) => a.action));
-        }
-      }
-    } catch { /* */ }
-    setLoading(false);
-  }, [filters]);
-
   useEffect(() => {
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    debounceRef.current = window.setTimeout(() => { void load(1); setPage(1); }, 400);
-  }, [load]);
+    let cancelled = false;
+    debounceRef.current = window.setTimeout(() => {
+      void (async () => {
+        setLoading(true);
+        const params = new URLSearchParams({ page: String(page), limit: "50" });
+        for (const [k, v] of Object.entries(filters)) {
+          if (v) params.set(k, v);
+        }
+        try {
+          const res = await fetch(apiUrl(`/api/me/settings/audit-log?${params}`), { headers: authHeaders() });
+          const json = await res.json();
+          if (!cancelled && json.success) {
+            setRows(json.data ?? []);
+            setMeta(json.meta ?? { page: 1, limit: 50, total: 0, pages: 1 });
+            if (json.filters?.actions?.length) {
+              setAvailableActions((json.filters.actions as Array<{ action: string }>).map((a) => a.action));
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+        if (!cancelled) setLoading(false);
+      })();
+    }, 400);
+    return () => {
+      cancelled = true;
+      if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    };
+  }, [filters, page]);
 
   const toggleExpand = (id: number) => {
     setExpanded((prev) => {
@@ -110,15 +118,21 @@ export function SettingsAuditLogPanel() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-bold text-slate-800">Audit Log</h2>
-          <p className="text-sm text-slate-500">All system activity — {meta.total.toLocaleString()} events</p>
-        </div>
-        <button className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 shadow-sm">
-          Export Excel
-        </button>
-      </div>
+      <PanelHeader
+        icon={<span aria-hidden>📋</span>}
+        title="Audit Log"
+        description={`All system activity — ${meta.total.toLocaleString()} events`}
+        action={
+          <button
+            type="button"
+            disabled
+            title="Export coming soon"
+            className="cursor-not-allowed rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-400 opacity-60 shadow-sm"
+          >
+            Export Excel
+          </button>
+        }
+      />
 
       {/* Filters */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-4">
@@ -183,21 +197,21 @@ export function SettingsAuditLogPanel() {
 
       {/* Table */}
       {loading ? (
-        <div className="space-y-2">{[...Array(8)].map((_, i) => <div key={i} className="h-14 bg-slate-100 rounded-xl animate-pulse" />)}</div>
+        <LoadingSpinner label="Loading audit log" />
       ) : (
         <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 border-b border-slate-100">
               <tr>
                 {["Timestamp", "User", "Action", "Entity", "Severity", "Channel", "IP", ""].map((h) => (
-                  <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase">{h}</th>
+                  <th key={h} scope="col" className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
-                <>
-                  <tr key={row.id} className={`hover:bg-slate-50 transition-colors border-b border-slate-50 ${expanded.has(row.id) ? "bg-blue-50/50" : ""}`}>
+                <Fragment key={row.id}>
+                  <tr className={`hover:bg-slate-50 transition-colors border-b border-slate-50 ${expanded.has(row.id) ? "bg-blue-50/50" : ""}`}>
                     <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">
                       {new Date(row.created_at).toLocaleString()}
                     </td>
@@ -228,8 +242,8 @@ export function SettingsAuditLogPanel() {
                       </button>
                     </td>
                   </tr>
-                  {expanded.has(row.id) && (
-                    <tr key={`${row.id}-detail`} className="bg-blue-50/30 border-b border-slate-100">
+                  {expanded.has(row.id) ? (
+                    <tr className="bg-blue-50/30 border-b border-slate-100">
                       <td colSpan={8} className="px-6 py-4">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                           <JsonBlock label="Old Value" value={row.old_value} />
@@ -248,8 +262,8 @@ export function SettingsAuditLogPanel() {
                         </div>
                       </td>
                     </tr>
-                  )}
-                </>
+                  ) : null}
+                </Fragment>
               ))}
               {rows.length === 0 && (
                 <tr><td colSpan={8} className="py-12 text-center text-slate-400">No audit events found</td></tr>
@@ -264,9 +278,9 @@ export function SettingsAuditLogPanel() {
         <div className="flex items-center justify-between text-sm text-slate-500">
           <span>Showing {((page - 1) * meta.limit) + 1}–{Math.min(page * meta.limit, meta.total)} of {meta.total.toLocaleString()}</span>
           <div className="flex gap-2">
-            <button disabled={page <= 1} onClick={() => { setPage(page - 1); void load(page - 1); }}
+            <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}
               className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg disabled:opacity-40 hover:bg-slate-50">← Prev</button>
-            <button disabled={page >= meta.pages} onClick={() => { setPage(page + 1); void load(page + 1); }}
+            <button disabled={page >= meta.pages} onClick={() => setPage((p) => p + 1)}
               className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg disabled:opacity-40 hover:bg-slate-50">Next →</button>
           </div>
         </div>

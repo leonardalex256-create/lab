@@ -31,7 +31,12 @@ import {
   StudentFeePayment,
   StudentAssessmentResult,
   AttendanceRecord,
+  StudentStatus,
 } from "../models/index.js";
+import {
+  generateAndPersistLineItems,
+  regenerateFeesAfterStatusChange,
+} from "../services/feeRuleEngine.js";
 
 function studentUploadDir(): string {
   return path.join(process.cwd(), "uploads", "students");
@@ -266,6 +271,7 @@ async function createStudentRecord(fields: {
   religion: string | null;
   specialNeeds: string | null;
   boardingStatus: "boarding" | "day_half" | "day_full" | null;
+  studentStatusId?: number | null;
   residenceAddress: string | null;
   medicalInfo: string | null;
   emergencyContactName: string | null;
@@ -314,6 +320,7 @@ async function createStudentRecord(fields: {
         religion: fields.religion,
         specialNeeds: fields.specialNeeds,
         boardingStatus: fields.boardingStatus,
+        studentStatusId: fields.studentStatusId,
         residenceAddress: fields.residenceAddress,
         medicalInfo: fields.medicalInfo,
         emergencyContactName,
@@ -338,39 +345,14 @@ async function createStudentRecord(fields: {
       { transaction: t },
     );
 
-    const feeStatus = feeStatusForStudent(fields.boardingStatus, className);
-    const allStructures = await StudentFeeStructure.findAll({
-      order: [
-        ["term", "ASC"],
-        ["created_at", "DESC"],
-      ],
-      transaction: t,
-    });
-    const structuresByTerm = new Map<string, StudentFeeStructure[]>();
-    for (const row of allStructures) {
-      const list = structuresByTerm.get(row.term) ?? [];
-      list.push(row);
-      structuresByTerm.set(row.term, list);
-    }
-
-    if (structuresByTerm.size > 0) {
-      for (const [assignmentTerm, termStructures] of structuresByTerm.entries()) {
-        const matchedStructure =
-          termStructures.find((row) => row.boardingStatus === feeStatus) ?? termStructures[0] ?? null;
-        const autoAmount = matchedStructure ? Number(matchedStructure.amountDueUgx) || 0 : 0;
-        if (autoAmount <= 0) continue;
-        const autoNotes = matchedStructure
-          ? `Auto-assigned on student creation (${matchedStructure.boardingStatus}).`
-          : "Auto-assigned on student creation.";
-        await StudentFeeAssignment.findOrCreate({
-          where: { studentId: createdInner.id, term: assignmentTerm, academicYear: assignYear },
-          defaults: {
-            amountDueUgx: autoAmount,
-            notes: autoNotes,
-          },
-          transaction: t,
-        });
-      }
+    if (fields.studentStatusId != null) {
+      const { term } = await loadOfficialSchoolTermYear();
+      await generateAndPersistLineItems({
+        studentId: createdInner.id,
+        term,
+        academicYear: assignYear,
+        transaction: t,
+      });
     }
 
     return createdInner;
@@ -972,8 +954,38 @@ export function createMeStudentsRouter() {
         const specialNeeds =
           csvVal(row, "specialneeds", "special_needs", "disability") || null;
         const boardingStatus =
-          parseBoardingStatus(csvVal(row, "boardingstatus", "boarding_status", "status")) ??
-          null;
+          parseBoardingStatus(csvVal(row, "boardingstatus", "boarding_status")) ?? null;
+        let studentStatusId: number | null = null;
+        const statusIdStr = csvVal(row, "studentstatusid", "student_status_id");
+        if (statusIdStr) {
+          const n = Number.parseInt(statusIdStr, 10);
+          if (!Number.isFinite(n) || n < 1) {
+            errors.push({ line: lineNo, error: "Invalid studentStatusId" });
+            continue;
+          }
+          const st = await StudentStatus.findByPk(n);
+          if (!st || st.archivedAt) {
+            errors.push({ line: lineNo, error: "studentStatusId not found" });
+            continue;
+          }
+          studentStatusId = n;
+        }
+        const statusCodeRaw = csvVal(
+          row,
+          "studentstatuscode",
+          "student_status_code",
+          "feestatus",
+        );
+        if (!studentStatusId && statusCodeRaw) {
+          const st = await StudentStatus.findOne({
+            where: { code: statusCodeRaw.trim().toUpperCase().slice(0, 20) },
+          });
+          if (!st || st.archivedAt) {
+            errors.push({ line: lineNo, error: "Unknown student status code" });
+            continue;
+          }
+          studentStatusId = st.id;
+        }
         const residenceAddress =
           csvVal(row, "residenceaddress", "residence_address", "homeaddress") || null;
         const medicalInfo =
@@ -1031,6 +1043,7 @@ export function createMeStudentsRouter() {
             religion: religion ? religion.slice(0, 80) : null,
             specialNeeds: specialNeeds ? specialNeeds.slice(0, 255) : null,
             boardingStatus,
+            studentStatusId,
             residenceAddress: residenceAddress ? residenceAddress.slice(0, 255) : null,
             medicalInfo: medicalInfo ? medicalInfo.slice(0, 2000) : null,
             emergencyContactName: emergencyContactName
@@ -1220,6 +1233,13 @@ export function createMeStudentsRouter() {
       if (boardingFilter) {
         andParts.push({ boardingStatus: boardingFilter });
       }
+      if (parsedQuery.data.missingStatus) {
+        andParts.push({ studentStatusId: { [Op.is]: null } });
+      }
+      const statusFilter = parsedQuery.data.studentStatusId;
+      if (statusFilter != null) {
+        andParts.push({ studentStatusId: statusFilter });
+      }
 
       let where: WhereOptions<Student> =
         andParts.length === 0 ? {} : andParts.length === 1 ? andParts[0]! : { [Op.and]: andParts };
@@ -1227,7 +1247,10 @@ export function createMeStudentsRouter() {
       const [rows, total] = await Promise.all([
         Student.findAll({
           where,
-          include: [{ model: ClassRoom, as: "classRoom", required: false }],
+          include: [
+            { model: ClassRoom, as: "classRoom", required: false },
+            { model: StudentStatus, as: "studentStatus", required: false },
+          ],
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           order: order as any,
           limit,
@@ -1441,8 +1464,20 @@ export function createMeStudentsRouter() {
       if (!parentAliveStatus) {
         return res.status(400).json({ error: "parentAliveStatus is required" });
       }
-      if (!boardingStatus) {
-        return res.status(400).json({ error: "boardingStatus is required" });
+      const studentStatusId = body.studentStatusId ?? undefined;
+      const activeStatusCount = await StudentStatus.count({
+        where: { archivedAt: null },
+      });
+      if (activeStatusCount > 0 && !studentStatusId) {
+        return res.status(400).json({
+          error: "studentStatusId is required — configure student statuses first",
+        });
+      }
+      if (studentStatusId) {
+        const statusRow = await StudentStatus.findByPk(studentStatusId);
+        if (!statusRow || statusRow.archivedAt) {
+          return res.status(400).json({ error: "Invalid studentStatusId" });
+        }
       }
       let previousGradesStored: string | null = null;
       if (
@@ -1509,7 +1544,8 @@ export function createMeStudentsRouter() {
         parentAddress: parentAliveStatus === "none" ? null : parentAddress,
         religion,
         specialNeeds,
-        boardingStatus,
+        boardingStatus: boardingStatus ?? null,
+        studentStatusId: studentStatusId ?? null,
         residenceAddress,
         medicalInfo,
         emergencyContactName,
@@ -1519,7 +1555,10 @@ export function createMeStudentsRouter() {
       });
 
       const withRoom = await Student.findByPk(created.id, {
-        include: [{ model: ClassRoom, as: "classRoom", required: false }],
+        include: [
+          { model: ClassRoom, as: "classRoom", required: false },
+          { model: StudentStatus, as: "studentStatus", required: false },
+        ],
       });
 
       return res.status(201).json({
@@ -1576,6 +1615,8 @@ export function createMeStudentsRouter() {
       const religionPatch = body.religion === undefined ? undefined : body.religion;
       const specialNeedsPatch = body.specialNeeds === undefined ? undefined : body.specialNeeds;
       const boardingStatusPatch = body.boardingStatus === undefined ? undefined : body.boardingStatus;
+      const studentStatusIdPatch = body.studentStatusId;
+      const statusFeeRecalcScope = body.statusFeeRecalcScope ?? "current_term";
       const residenceAddressPatch =
         body.residenceAddress === undefined ? undefined : body.residenceAddress;
       const medicalInfoPatch = body.medicalInfo === undefined ? undefined : body.medicalInfo;
@@ -1707,6 +1748,16 @@ export function createMeStudentsRouter() {
         });
       }
 
+      if (studentStatusIdPatch !== undefined) {
+        if (studentStatusIdPatch === null) {
+          return res.status(400).json({ error: "studentStatusId cannot be cleared once set" });
+        }
+        const statusRow = await StudentStatus.findByPk(studentStatusIdPatch);
+        if (!statusRow || statusRow.archivedAt) {
+          return res.status(400).json({ error: "Invalid studentStatusId" });
+        }
+      }
+
       await row.update({
         ...(firstName ? { firstName } : {}),
         ...(middleName !== undefined ? { middleName } : {}),
@@ -1742,6 +1793,7 @@ export function createMeStudentsRouter() {
         ...(religionPatch !== undefined ? { religion: religionPatch } : {}),
         ...(specialNeedsPatch !== undefined ? { specialNeeds: specialNeedsPatch } : {}),
         ...(boardingStatusPatch !== undefined ? { boardingStatus: boardingStatusPatch } : {}),
+        ...(studentStatusIdPatch !== undefined ? { studentStatusId: studentStatusIdPatch } : {}),
         ...(residenceAddressPatch !== undefined ? { residenceAddress: residenceAddressPatch } : {}),
         ...(medicalInfoPatch !== undefined ? { medicalInfo: medicalInfoPatch } : {}),
         ...(emergencyContactNamePatch !== undefined
@@ -1754,8 +1806,19 @@ export function createMeStudentsRouter() {
         ...(guardianPhonePatch !== undefined ? { guardianPhone: guardianPhonePatch } : {}),
       });
 
+      const priorStatusId = row.studentStatusId ?? null;
+      const statusChanged =
+        studentStatusIdPatch !== undefined &&
+        studentStatusIdPatch !== priorStatusId;
+      if (statusChanged && studentStatusIdPatch != null) {
+        await regenerateFeesAfterStatusChange(id, statusFeeRecalcScope);
+      }
+
       const withRoom = await Student.findByPk(id, {
-        include: [{ model: ClassRoom, as: "classRoom", required: false }],
+        include: [
+          { model: ClassRoom, as: "classRoom", required: false },
+          { model: StudentStatus, as: "studentStatus", required: false },
+        ],
       });
       return res.json({ item: studentToApiRow(withRoom!) });
     } catch (err) {

@@ -72,6 +72,10 @@ export const messages: Record<Locale, Record<string, string>> = {
     "nav.settings.restore": "Restore data",
     "nav.settings.modes": "Display & modes",
     "nav.settings.feesStructure": "Fees structure",
+    "nav.settings.feesSettingsStructure": "Fees Settings & Structure",
+    "feesSetup.title": "Fees Settings & Structure",
+    "feesSetup.subtitle":
+      "Configure student statuses, fee categories, and rules used by admissions and assign-fees.",
     "nav.settings.classStructure": "Class structure",
     "nav.settings.academicSettings": "Academic settings",
 
@@ -96,6 +100,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     "settings.modes.fontPoppins": "Poppins",
     "settings.modes.fontManrope": "Manrope",
     "settings.modes.fontJakarta": "Jakarta Sans",
+    "settings.modes.fontPreview": "The quick brown fox jumps over the lazy dog",
 
     "brand.subtitle": "Nursery and Primary School, Bunamwaya",
 
@@ -603,6 +608,22 @@ export const messages: Record<Locale, Record<string, string>> = {
     "students.modal.delete": "Delete student",
     "students.modal.deleteConfirm": "Delete this student permanently?",
     "students.modal.deleteFailed": "Could not delete student.",
+    "students.modal.studentStatus": "Student status (fees)",
+    "students.modal.statusNotSet": "Not set",
+    "students.modal.selectStatus": "Select student status",
+    "students.modal.statusRequired": "Student status is required for fee calculations.",
+    "students.modal.statusChangeHint":
+      "Saving will ask whether to update fees for the current term only or all past terms.",
+    "students.modal.statusChangeTitle": "Student status change",
+    "students.modal.statusChangeIntro": "You are changing this student's fee status from",
+    "students.modal.statusChangeTo": "to",
+    "students.modal.statusChangeChoose": "Choose how fee records should be updated.",
+    "students.modal.statusScopeCurrentTitle": "From current term only",
+    "students.modal.statusScopeCurrentBody": "Recalculate fees for",
+    "students.modal.statusScopeAllTitle": "Update all past records",
+    "students.modal.statusScopeAllBody":
+      "Recalculate fee line items for every term on file. Amounts due may change; existing receipts are not reversed automatically.",
+    "students.modal.statusChangeConfirm": "Apply & save",
     "students.photo.label": "Passport / ID photo",
     "students.photo.labelAdmission": "Passport photo (optional)",
     "students.photo.uploadLaterHint": "Photo can be added later from the student profile.",
@@ -719,6 +740,10 @@ export const messages: Record<Locale, Record<string, string>> = {
     "nav.settings.restore": "Rejesha data",
     "nav.settings.modes": "Mwonekano na hali",
     "nav.settings.feesStructure": "Muundo wa ada",
+    "nav.settings.feesSettingsStructure": "Mipangilio na muundo wa ada",
+    "feesSetup.title": "Mipangilio na muundo wa ada",
+    "feesSetup.subtitle":
+      "Sanidi hali za wanafunzi, aina za ada, na sheria zinazotumika katika uandikishaji na ugawaji wa ada.",
     "nav.settings.classStructure": "Muundo wa madarasa",
     "nav.settings.academicSettings": "Mipangilio ya masomo",
 
@@ -744,6 +769,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     "settings.modes.fontPoppins": "Poppins",
     "settings.modes.fontManrope": "Manrope",
     "settings.modes.fontJakarta": "Jakarta Sans",
+    "settings.modes.fontPreview": "Mbwa mzuri anaruka juu ya mzigo",
 
     "brand.subtitle": "Shule ya awali na msingi, Bunamwaya",
 
@@ -1253,6 +1279,22 @@ export const messages: Record<Locale, Record<string, string>> = {
     "students.modal.delete": "Futa mwanafunzi",
     "students.modal.deleteConfirm": "Futa mwanafunzi huyu kabisa?",
     "students.modal.deleteFailed": "Imeshindwa kumfuta mwanafunzi.",
+    "students.modal.studentStatus": "Hali ya mwanafunzi (ada)",
+    "students.modal.statusNotSet": "Haijawekwa",
+    "students.modal.selectStatus": "Chagua hali ya mwanafunzi",
+    "students.modal.statusRequired": "Hali ya mwanafunzi inahitajika kwa hesabu ya ada.",
+    "students.modal.statusChangeHint":
+      "Ukihifadhi, utaombwa kubadilisha ada kwa muhula wa sasa tu au mihula yote iliyopita.",
+    "students.modal.statusChangeTitle": "Badilisha hali ya mwanafunzi",
+    "students.modal.statusChangeIntro": "Unabadilisha hali ya ada kutoka",
+    "students.modal.statusChangeTo": "hadi",
+    "students.modal.statusChangeChoose": "Chagua jinsi rekodi za ada zitasasishwa.",
+    "students.modal.statusScopeCurrentTitle": "Kuanzia muhula wa sasa tu",
+    "students.modal.statusScopeCurrentBody": "Hesabu upya ada kwa",
+    "students.modal.statusScopeAllTitle": "Sasisha rekodi zote za zamani",
+    "students.modal.statusScopeAllBody":
+      "Hesabu upya vipengele vya ada kwa kila muhula ulio kwenye faili. Ada zinazodaiwa zinaweza kubadilika; risiti zilizopo hazifutwi kiotomatiki.",
+    "students.modal.statusChangeConfirm": "Tekeleza na hifadhi",
     "students.photo.label": "Picha ya pasipoti / kitambulisho",
     "students.photo.labelAdmission": "Picha ya pasipoti (si lazima)",
     "students.photo.uploadLaterHint": "Picha inaweza kuongezwa baadaye kwenye wasifu wa mwanafunzi.",

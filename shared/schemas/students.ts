@@ -23,6 +23,12 @@ export const studentListQuerySchema = z.object({
     const v = value.trim().toLowerCase();
     return v.length > 0 ? v : undefined;
   }, studentListBoardingFilterSchema.optional()),
+  missingStatus: z.preprocess((value: unknown) => {
+    if (value === undefined || value === null || value === "") return undefined;
+    if (value === true || value === "true" || value === "1") return true;
+    return undefined;
+  }, z.literal(true).optional()),
+  studentStatusId: optionalPositiveInt(),
   limit: z.preprocess((value: unknown) => {
     if (value === undefined || value === null || value === "") return 50;
     const n = typeof value === "number" ? value : Number(value);
@@ -98,12 +104,15 @@ export const studentCreateBodySchema = z.object({
   religion: optionalTrimmed(80),
   specialNeeds: optionalTrimmed(255),
   boardingStatus: boardingStatusSchema.optional(),
+  studentStatusId: optionalPositiveInt(),
   residenceAddress: optionalTrimmed(255),
   medicalInfo: optionalTrimmed(2000),
   emergencyContactName: optionalTrimmed(120),
   emergencyContactPhone: ugandanPhoneOptional(),
   guardianName: optionalTrimmed(120),
   guardianPhone: ugandanPhoneOptional(),
+  /** When studentStatusId changes: recalc fees for current term only or all terms with records. */
+  statusFeeRecalcScope: z.enum(["current_term", "all_terms"]).optional(),
 });
 
 export const studentUpdateBodySchema = z.object({
@@ -130,6 +139,7 @@ export const studentUpdateBodySchema = z.object({
   religion: nullableTrimmed(80),
   specialNeeds: nullableTrimmed(255),
   boardingStatus: boardingStatusSchema.nullable().optional(),
+  studentStatusId: optionalPositiveInt(),
   residenceAddress: nullableTrimmed(255),
   medicalInfo: nullableTrimmed(2000),
   emergencyContactName: nullableTrimmed(120),

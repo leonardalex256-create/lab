@@ -1,5 +1,18 @@
 @import "tailwindcss";
 
+@page {
+  size: A5 portrait;
+  margin: 8mm;
+}
+
+@media print {
+  html,
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+}
+
 /* Soft UI palette — cool paper neutrals, teal + sky accents */
 @layer base {
   :root {

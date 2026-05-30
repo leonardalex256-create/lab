@@ -15,7 +15,7 @@ export type FeeComplianceIssue = {
   fullName: string;
   className: string | null;
   term: string;
-  reason: "missing_assignment" | "zero_amount";
+  reason: "missing_status" | "missing_assignment" | "zero_amount";
 };
 
 const NOTIFY_TITLE = "Fee compliance: students need a positive assignment";
@@ -41,7 +41,14 @@ export async function listNonCompliantStudentsForTerm(
   academicYear: string,
 ): Promise<FeeComplianceIssue[]> {
   const students = await Student.findAll({
-    attributes: ["id", "admissionNumber", "firstName", "middleName", "lastName"],
+    attributes: [
+      "id",
+      "admissionNumber",
+      "firstName",
+      "middleName",
+      "lastName",
+      "studentStatusId",
+    ],
     include: [{ model: ClassRoom, as: "classRoom", required: false, attributes: ["name"] }],
   });
   const assignments = await StudentFeeAssignment.findAll({
@@ -57,6 +64,17 @@ export async function listNonCompliantStudentsForTerm(
   for (const s of students) {
     const classRoom = s.get("classRoom") as ClassRoom | null | undefined;
     const fullName = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(" ");
+    if (s.studentStatusId == null) {
+      issues.push({
+        studentId: s.id,
+        admissionNumber: s.admissionNumber,
+        fullName,
+        className: classRoom?.name ?? null,
+        term,
+        reason: "missing_status",
+      });
+      continue;
+    }
     const amt = byStudent.get(s.id);
     if (amt === undefined) {
       issues.push({
@@ -84,7 +102,12 @@ export async function listNonCompliantStudentsForTerm(
 export function formatComplianceNotificationBody(issues: FeeComplianceIssue[], term: string): string {
   const header = `${issues.length} student(s) need a positive fee assignment for ${term} (school setting: current term).\n\n`;
   const lines = issues.slice(0, 250).map((i) => {
-    const flag = i.reason === "missing_assignment" ? "no assignment row" : "UGX 0 assigned";
+    const flag =
+      i.reason === "missing_status"
+        ? "no student status"
+        : i.reason === "missing_assignment"
+          ? "no assignment row"
+          : "UGX 0 assigned";
     return `${i.admissionNumber}\t${i.fullName}\t${i.className ?? "—"}\t${flag}`;
   });
   const more = issues.length > 250 ? `\n… and ${issues.length - 250} more.` : "";

@@ -4,6 +4,7 @@ import { assignStudentFee, fetchStudentStatement } from "../../../api/financeSta
 import { fetchFeeStructure, type FeeStructureRow } from "../../../api/financeFeeStructure";
 import { formatCurrencyUGX } from "../shared/financeFormat";
 import { AssignFeesMultiplePage } from "./AssignFeesMultiplePage";
+import { StudentFeeLineItemsPanel } from "./StudentFeeLineItemsPanel";
 import { useTermContext } from "../../../context/TermContext";
 
 /** Sentinel value for fee type `<select>` — not a fee-structure status slug. */
@@ -839,6 +840,10 @@ export function AssignFeesPage() {
             }}
           />
         </div>
+
+        {previewStudent && assignTargets.length <= 1 ? (
+          <StudentFeeLineItemsPanel studentId={previewStudent.id} />
+        ) : null}
 
         <div
           style={{

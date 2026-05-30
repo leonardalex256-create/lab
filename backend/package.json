@@ -14,10 +14,12 @@
     "seed:permissions": "tsx scripts/seed-permissions.ts",
     "seed:inbox": "tsx scripts/seed-inbox.ts",
     "seed:dashboard": "tsx scripts/seed-dashboard-data.ts",
+    "seed:fee-config": "tsx scripts/seed-fee-config.ts",
     "db:sync": "tsx scripts/sync-db.ts",
     "db:wipe": "tsx scripts/wipe-all-data.ts"
   },
   "dependencies": {
+    "@formulajs/formulajs": "^4.6.0",
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

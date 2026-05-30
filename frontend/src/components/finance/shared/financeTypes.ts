@@ -106,6 +106,13 @@ export type StudentStatementPayload = {
   totalPaid: number;
   outstandingAmount: number;
   creditAmount: number;
+  lineItems?: Array<{
+    feeCategoryId: number;
+    feeCategoryCode: string;
+    feeCategoryName: string;
+    amountUgx: number;
+    notes: string | null;
+  }>;
   transactions: Array<{
     id: number;
     date: string;
