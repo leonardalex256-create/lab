@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchRolePermissions,
   fetchUserPermissions,
-  updateRolePermissionsBulk,
+  updateRolePermissions,
   updateUserPermissionOverrides,
 } from "../../api/settings";
+import { PermissionAssignmentPanel, UserPermissionOverridePanel } from "./permissions";
 import {
   adminResetManagedUserPassword,
   createManagedUser,
@@ -22,11 +23,6 @@ import {
   type StaffMemberApiRow,
 } from "../../api/students";
 import { ConfirmModal } from "./shared";
-import {
-  groupAvailableKeysBySector,
-  orphanPermissionKeys,
-  PERMISSION_DETAILS,
-} from "./permissionCatalog";
 
 type UserRoleOption = {
   id:
@@ -111,7 +107,6 @@ export function SettingsUsersRolesPanel() {
   const [userOverrideMap, setUserOverrideMap] = useState<Record<string, boolean>>({});
   const [isSaving, setIsSaving] = useState(false);
   const [permissionSearch, setPermissionSearch] = useState("");
-  const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(new Set());
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("");
@@ -137,8 +132,6 @@ export function SettingsUsersRolesPanel() {
   const activeManageMenuRef = useRef<HTMLDivElement | null>(null);
 
   const lastFetchedPermissionMappingsRef = useRef<Array<{ role: string; permissionKey: string }>>([]);
-  const [permissionsToast, setPermissionsToast] = useState<string | null>(null);
-  const [confirmSaveRoleOpen, setConfirmSaveRoleOpen] = useState(false);
 
   const [deleteUserModal, setDeleteUserModal] = useState<{ open: boolean; user: ManagedUser | null }>({
     open: false,
@@ -195,15 +188,6 @@ export function SettingsUsersRolesPanel() {
     setStatus(null);
   }
 
-  const permissionSectors = useMemo(
-    () => groupAvailableKeysBySector(availablePermissionKeys),
-    [availablePermissionKeys],
-  );
-  const orphanKeys = useMemo(
-    () => orphanPermissionKeys(availablePermissionKeys),
-    [availablePermissionKeys],
-  );
-
   const resetPasswordChecks = useMemo(() => {
     const p = resetPasswordInput;
     return {
@@ -258,7 +242,6 @@ export function SettingsUsersRolesPanel() {
           setPermissionMappings(data.permissions);
           setAvailablePermissionKeys(data.availableKeys);
           lastFetchedPermissionMappingsRef.current = data.permissions;
-          setDirtyKeys(new Set());
         })
         .catch((err) => {
           setStatus("Error loading permissions: " + err.message);
@@ -299,83 +282,6 @@ export function SettingsUsersRolesPanel() {
       setLinkedClassIds([]);
     }
   }, [shouldShowLinkedClasses, linkedClassIds.length]);
-
-  async function handleTogglePermission(roleId: string, permKey: string) {
-    const isCurrentlyChecked = permissionMappings.some(m => m.role === roleId && m.permissionKey === permKey);
-    let newMappings = [];
-    if (isCurrentlyChecked) {
-      newMappings = permissionMappings.filter(m => !(m.role === roleId && m.permissionKey === permKey));
-    } else {
-      newMappings = [...permissionMappings, { role: roleId, permissionKey: permKey }];
-    }
-    setPermissionMappings(newMappings);
-
-    const baseline = new Set(
-      lastFetchedPermissionMappingsRef.current.map((m) => `${m.role}:${m.permissionKey}`),
-    );
-    const pair = `${roleId}:${permKey}`;
-    const nextChecked = !isCurrentlyChecked;
-    const differs = baseline.has(pair) !== nextChecked;
-    setDirtyKeys((prev) => {
-      const copy = new Set(prev);
-      if (differs) copy.add(pair);
-      else copy.delete(pair);
-      return copy;
-    });
-  }
-
-  async function handleSavePermissions() {
-    setIsSaving(true);
-    setStatus(null);
-    try {
-      const updates = ROLE_OPTIONS.map((r) => ({
-        role: r.id,
-        permissions: permissionMappings
-          .filter((m) => m.role === r.id)
-          .map((m) => m.permissionKey),
-      }));
-      await updateRolePermissionsBulk(updates);
-      setStatus("Permissions updated successfully!");
-      lastFetchedPermissionMappingsRef.current = permissionMappings;
-      setDirtyKeys(new Set());
-    } catch (err: unknown) {
-      setStatus("Error saving permissions: " + (err instanceof Error ? err.message : String(err)));
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  function effectiveForUserPermission(permissionKey: string): boolean {
-    if (permissionKey in userOverrideMap) return Boolean(userOverrideMap[permissionKey]);
-    return rolePermissionKeySet.has(permissionKey);
-  }
-
-  function cycleUserPermissionOverride(permissionKey: string) {
-    const baseAllowed = rolePermissionKeySet.has(permissionKey);
-    const hasOverride = Object.prototype.hasOwnProperty.call(userOverrideMap, permissionKey);
-    // Cycle: Inherited → Override Allow → Override Deny → Inherited
-    if (!hasOverride) {
-      setUserOverrideMap((prev) => ({ ...prev, [permissionKey]: true }));
-      return;
-    }
-    const currentOverride = Boolean(userOverrideMap[permissionKey]);
-    if (currentOverride === true) {
-      setUserOverrideMap((prev) => ({ ...prev, [permissionKey]: false }));
-      return;
-    }
-    if (currentOverride === false) {
-      setUserOverrideMap((prev) => {
-        const copy = { ...prev };
-        delete copy[permissionKey];
-        return copy;
-      });
-      return;
-    }
-
-    // Fallback: preserve previous behavior if unexpected state appears.
-    const next = !baseAllowed;
-    setUserOverrideMap((prev) => ({ ...prev, [permissionKey]: next }));
-  }
 
   async function handleSaveUserPermissions() {
     if (selectedPermissionUserId == null) {
@@ -474,16 +380,6 @@ export function SettingsUsersRolesPanel() {
     setView("add");
     setActiveManageRowId(null);
     setStatus(null);
-  }
-
-  function permissionDetail(permKey: string) {
-    const d = PERMISSION_DETAILS[permKey];
-    return {
-      title: d?.title ?? permKey.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase()),
-      description:
-        d?.description ??
-        "Controls access for this capability. Extend permissionCatalog.ts when new keys are added.",
-    };
   }
 
   async function handleToggleActive(user: ManagedUser) {
@@ -601,249 +497,8 @@ export function SettingsUsersRolesPanel() {
     setStatus(null);
   }
 
-  function renderPermissionMatrix(permKeys: string[]) {
-    const iconByRole: Record<string, string> = {
-      admin: "🛡️",
-      accountant: "💰",
-      head_teacher: "🎓",
-      teacher: "👨‍🏫",
-      registrar: "📋",
-      staff: "👷",
-      student: "🎒",
-      parent: "👨‍👩‍👧",
-    };
-
-    const baseline = new Set(
-      lastFetchedPermissionMappingsRef.current.map((m) => `${m.role}:${m.permissionKey}`),
-    );
-
-    function roleHasDirty(roleId: string) {
-      for (const k of dirtyKeys) {
-        if (k.startsWith(`${roleId}:`)) return true;
-      }
-      return false;
-    }
-
-    function toggleTrackClass(on: boolean) {
-      return [
-        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border transition-colors",
-        on ? "bg-emerald-500 border-emerald-500" : "bg-slate-200 border-slate-300",
-      ].join(" ");
-    }
-
-    function toggleKnobClass(on: boolean) {
-      return [
-        "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition",
-        on ? "translate-x-5" : "translate-x-0.5",
-      ].join(" ");
-    }
-
-    function setDirtyForPair(roleId: string, permKey: string, nextChecked: boolean, prev: Set<string>) {
-      const pair = `${roleId}:${permKey}`;
-      const differs = baseline.has(pair) !== nextChecked;
-      if (differs) prev.add(pair);
-      else prev.delete(pair);
-    }
-
-    function bulkSetRole(roleId: string, nextChecked: boolean) {
-      const current = new Set(permissionMappings.map((m) => `${m.role}:${m.permissionKey}`));
-      const next = new Set(current);
-      for (const permKey of permKeys) {
-        const pair = `${roleId}:${permKey}`;
-        if (nextChecked) next.add(pair);
-        else next.delete(pair);
-      }
-      setPermissionMappings(
-        Array.from(next).map((p) => {
-          const [role, permissionKey] = p.split(":");
-          return { role, permissionKey };
-        }),
-      );
-      setDirtyKeys((prev) => {
-        const copy = new Set(prev);
-        for (const permKey of permKeys) setDirtyForPair(roleId, permKey, nextChecked, copy);
-        return copy;
-      });
-    }
-
-    function bulkSetSectorAllRoles(nextChecked: boolean) {
-      const current = new Set(permissionMappings.map((m) => `${m.role}:${m.permissionKey}`));
-      const next = new Set(current);
-      for (const roleId of ROLE_OPTIONS.map((r) => r.id)) {
-        for (const permKey of permKeys) {
-          const pair = `${roleId}:${permKey}`;
-          if (nextChecked) next.add(pair);
-          else next.delete(pair);
-        }
-      }
-      setPermissionMappings(
-        Array.from(next).map((p) => {
-          const [role, permissionKey] = p.split(":");
-          return { role, permissionKey };
-        }),
-      );
-      setDirtyKeys((prev) => {
-        const copy = new Set(prev);
-        for (const roleId of ROLE_OPTIONS.map((r) => r.id)) {
-          for (const permKey of permKeys) setDirtyForPair(roleId, permKey, nextChecked, copy);
-        }
-        return copy;
-      });
-    }
-
-    return (
-      <div className="overflow-auto">
-        <table className="w-full min-w-[980px] border-collapse text-left">
-          <thead className="sticky top-0 z-20 bg-white">
-            <tr className="border-b border-slate-200">
-              <th className="px-6 py-4 align-bottom">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Permission</div>
-              </th>
-              {ROLE_OPTIONS.map((r) => {
-                const rows = permKeys.map((permKey) =>
-                  permissionMappings.some((m) => m.role === r.id && m.permissionKey === permKey),
-                );
-                const allChecked = rows.length > 0 && rows.every(Boolean);
-                const anyDirty = roleHasDirty(r.id);
-                const icon = iconByRole[r.id] ?? "👤";
-                return (
-                  <th key={r.id} className="px-3 py-4 text-center align-bottom" title={r.description}>
-                    <div className="flex flex-col items-center gap-1">
-                      <div className="inline-flex items-center gap-2 text-xs font-black text-slate-800">
-                        <span className="text-base">{icon}</span>
-                        <span className="uppercase tracking-wide">{r.label}</span>
-                        {anyDirty ? (
-                          <span className="ml-1 h-2 w-2 rounded-full bg-amber-400" title="Unsaved changes" />
-                        ) : null}
-                      </div>
-                      <button
-                        type="button"
-                        className="text-[11px] font-semibold text-indigo-600 hover:underline"
-                        onClick={() => bulkSetRole(r.id, !allChecked)}
-                      >
-                        {allChecked ? "Clear" : "Select All"}
-                      </button>
-                    </div>
-                  </th>
-                );
-              })}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            <tr className="bg-slate-50/60">
-              <td className="px-6 py-3">
-                <div className="text-xs font-bold text-slate-700">Sector actions</div>
-                <div className="text-[11px] font-medium text-slate-500">Apply to all roles for this sector.</div>
-              </td>
-              <td colSpan={ROLE_OPTIONS.length} className="px-6 py-3">
-                <div className="flex flex-wrap gap-2 justify-end">
-                  <button
-                    type="button"
-                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
-                    onClick={() => bulkSetSectorAllRoles(true)}
-                  >
-                    Select All in Sector
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
-                    onClick={() => bulkSetSectorAllRoles(false)}
-                  >
-                    Clear Sector
-                  </button>
-                </div>
-              </td>
-            </tr>
-
-            {permKeys.map((permKey) => {
-              const { title, description } = permissionDetail(permKey);
-              const rowDirty = Array.from(dirtyKeys).some((k) => k.endsWith(`:${permKey}`));
-              const grantedRoles = ROLE_OPTIONS.filter((r) =>
-                permissionMappings.some((m) => m.role === r.id && m.permissionKey === permKey),
-              );
-              return (
-                <tr
-                  key={permKey}
-                  className={`hover:bg-slate-50 ${
-                    rowDirty ? "border-l-4 border-amber-400" : "border-l-4 border-transparent"
-                  }`}
-                >
-                  <td className="px-6 py-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <p className="font-bold text-slate-900">{title}</p>
-                        <p className="mt-1 text-xs font-medium leading-relaxed text-slate-600">{description}</p>
-                        <p className="mt-1.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                          {permKey}
-                        </p>
-                      </div>
-                      <div className="shrink-0 text-right">
-                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Roles granted</div>
-                        <div className="mt-1 flex flex-wrap justify-end gap-1">
-                          {grantedRoles.length === 0 ? (
-                            <span className="text-xs text-slate-400">—</span>
-                          ) : (
-                            grantedRoles.map((r) => (
-                              <span
-                                key={r.id}
-                                className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-700 ring-1 ring-slate-200"
-                                title={r.label}
-                              >
-                                {iconByRole[r.id] ?? "👤"}
-                              </span>
-                            ))
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </td>
-
-                  {ROLE_OPTIONS.map((r) => {
-                    const isChecked = permissionMappings.some(
-                      (m) => m.role === r.id && m.permissionKey === permKey,
-                    );
-                    const dirty = dirtyKeys.has(`${r.id}:${permKey}`);
-                    return (
-                      <td key={r.id} className="px-3 py-3 text-center">
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={isChecked}
-                          aria-label={`${r.label}: ${title}`}
-                          onClick={() => handleTogglePermission(r.id, permKey)}
-                          className="inline-flex items-center justify-center"
-                          title={dirty ? "Unsaved change" : undefined}
-                        >
-                          <span className={toggleTrackClass(isChecked)}>
-                            <span className={toggleKnobClass(isChecked)} />
-                          </span>
-                        </button>
-                      </td>
-                    );
-                  })}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    );
-  }
-
   if (view === "permissions") {
     const successMessage = status?.startsWith("Permissions updated") || status?.startsWith("User permissions updated");
-    const totalPerms = availablePermissionKeys.length;
-    const searchLower = permissionSearch.trim().toLowerCase();
-    const matchPermKey = (k: string) => {
-      if (!searchLower) return true;
-      const { title } = permissionDetail(k);
-      return title.toLowerCase().includes(searchLower) || k.toLowerCase().includes(searchLower);
-    };
-    const filteredSectors = permissionSectors
-      .map((s) => ({ ...s, keys: s.keys.filter((k) => matchPermKey(k)) }))
-      .filter((s) => s.keys.length > 0);
-    const filteredOrphanKeys = orphanKeys.filter((k) => matchPermKey(k));
-    const showingCount = filteredSectors.reduce((sum, s) => sum + s.keys.length, 0) + filteredOrphanKeys.length;
     return (
       <div className="max-w-[1100px] space-y-6 pb-24">
         <header className="flex flex-col rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
@@ -858,8 +513,8 @@ export function SettingsUsersRolesPanel() {
                 </h1>
                 <p className="mt-1 text-sm font-medium text-slate-500">
                   {permissionMode === "role"
-                    ? "Configure system access for each role. Grant or revoke per sector, then save."
-                    : "Individual permission overrides for specific administrative accounts."}
+                    ? "Select a role, expand each module, and toggle granular permissions. Save applies to that role only."
+                    : "Select a user and override granular permissions on top of their role defaults."}
                 </p>
               </div>
             </div>
@@ -900,72 +555,37 @@ export function SettingsUsersRolesPanel() {
               >
                 Back
               </button>
-              {permissionMode === "role" && dirtyKeys.size > 0 ? (
+              {permissionMode === "user" ? (
                 <button
                   type="button"
                   disabled={isSaving}
-                  onClick={() => {
-                    setPermissionMappings(lastFetchedPermissionMappingsRef.current);
-                    setDirtyKeys(new Set());
-                    setStatus(null);
-                  }}
-                  className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-bold text-slate-600 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+                  onClick={() => void handleSaveUserPermissions()}
+                  className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 hover:shadow-indigo-300 disabled:pointer-events-none disabled:opacity-60 transition-all"
                 >
-                  Discard Changes
+                  {isSaving ? "Saving..." : "Save Changes"}
                 </button>
               ) : null}
-              <button
-                type="button"
-                disabled={isSaving}
-                onClick={() => {
-                  if (permissionMode === "role") {
-                    setConfirmSaveRoleOpen(true);
-                    return;
-                  }
-                  void handleSaveUserPermissions();
-                }}
-                className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 hover:shadow-indigo-300 disabled:pointer-events-none disabled:opacity-60 transition-all"
-              >
-                {isSaving
-                  ? "Saving..."
-                  : permissionMode === "role" && dirtyKeys.size > 0
-                    ? `Save Changes (${dirtyKeys.size} pending)`
-                    : "Save Changes"}
-              </button>
             </div>
           </div>
         </header>
 
         <div className="space-y-6">
-          <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex-1">
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
-                  Search permissions
-                </label>
-                <input
-                  value={permissionSearch}
-                  onChange={(e) => setPermissionSearch(e.target.value)}
-                  placeholder="Search permissions by name or key..."
-                  className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 outline-none shadow-sm transition-all hover:border-slate-300 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
-                />
+          {permissionMode === "user" ? (
+            <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex-1">
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+                    Search permissions
+                  </label>
+                  <input
+                    value={permissionSearch}
+                    onChange={(e) => setPermissionSearch(e.target.value)}
+                    placeholder="Search by permission key or description…"
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 outline-none shadow-sm transition-all hover:border-slate-300 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
+                  />
+                </div>
               </div>
-              <div className="shrink-0 rounded-xl bg-indigo-50 px-4 py-2.5 text-xs font-bold text-indigo-600 ring-1 ring-indigo-100">
-                Showing {showingCount} of {totalPerms} permissions
-              </div>
-            </div>
-            {showingCount === 0 ? (
-              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-5 py-6 text-center">
-                <div className="text-lg font-black text-slate-800">🔍 No permissions match your search.</div>
-                <div className="mt-1 text-sm font-medium text-slate-600">Try a broader term.</div>
-              </div>
-            ) : null}
-          </section>
-
-          {permissionsToast ? (
-            <div className="fixed top-4 right-4 z-[210] max-w-[92vw] rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-800 shadow-lg">
-              {permissionsToast}
-            </div>
+            </section>
           ) : null}
 
           {permissionMode === "user" ? (
@@ -1044,152 +664,35 @@ export function SettingsUsersRolesPanel() {
                   </button>
                 </div>
               </div>
-              <p className="mt-2 text-xs font-medium text-slate-500">
-                Base role: <span className="font-bold text-slate-700">{selectedPermissionUserRole || "not selected"}</span>.
-                Unchecked options are denied, checked options are allowed. Overrides can differ from role defaults.
-              </p>
             </section>
           ) : null}
-          {filteredSectors.map((sector) => (
-            <section
-              key={sector.id}
-              className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm transition-shadow hover:shadow-md"
-            >
-              <div className="border-b border-slate-100 bg-slate-50/50 px-6 py-4">
-                <h2 className="text-sm font-bold uppercase tracking-wider text-slate-800">{sector.title}</h2>
-                <p className="mt-0.5 text-xs font-medium text-slate-500">{sector.subtitle}</p>
-              </div>
-              {permissionMode === "role" ? (
-                renderPermissionMatrix([...sector.keys])
-              ) : (
-                <div className="grid gap-3 p-4 sm:grid-cols-2">
-                  {sector.keys.map((permKey) => {
-                    const { title, description } = permissionDetail(permKey);
-                    const checked = effectiveForUserPermission(permKey);
-                    const roleBased = rolePermissionKeySet.has(permKey);
-                    const overridden = Object.prototype.hasOwnProperty.call(userOverrideMap, permKey);
-                    const overrideVal = overridden ? Boolean(userOverrideMap[permKey]) : null;
-                    const stateBadge =
-                      overridden && overrideVal === true
-                        ? { label: "Override: Allowed", cls: "bg-amber-50 text-amber-800 ring-amber-200" }
-                        : overridden && overrideVal === false
-                          ? { label: "Override: Denied", cls: "bg-rose-50 text-rose-700 ring-rose-200" }
-                          : roleBased && checked
-                            ? { label: "From role", cls: "bg-slate-100 text-slate-700 ring-slate-200" }
-                            : { label: "Not granted", cls: "bg-slate-100 text-slate-500 ring-slate-200" };
-                    const toggleColor =
-                      overridden && overrideVal === true
-                        ? "bg-emerald-500 border-emerald-500"
-                        : overridden && overrideVal === false
-                          ? "bg-rose-500 border-rose-500"
-                          : roleBased && checked
-                            ? "bg-blue-500 border-blue-500"
-                            : "bg-slate-200 border-slate-300";
-                    return (
-                      <label
-                        key={permKey}
-                        className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm hover:border-slate-300"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="font-bold text-slate-900">{title}</p>
-                            <p className="mt-1 text-xs font-medium leading-relaxed text-slate-600">{description}</p>
-                            <p className="mt-1.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                              {permKey}
-                            </p>
-                            <div className="mt-2 flex flex-wrap items-center gap-2">
-                              <span
-                                className={`inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ring-1 ${stateBadge.cls}`}
-                              >
-                                {stateBadge.label}
-                              </span>
-                              {overridden ? (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setUserOverrideMap((prev) => {
-                                      const copy = { ...prev };
-                                      delete copy[permKey];
-                                      return copy;
-                                    })
-                                  }
-                                  className="text-[11px] font-semibold text-indigo-600 hover:underline"
-                                >
-                                  Reset to Role Default
-                                </button>
-                              ) : null}
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-checked={checked}
-                            onClick={() => cycleUserPermissionOverride(permKey)}
-                            className="mt-1 inline-flex items-center"
-                            title="Cycle: Inherited → Override Allow → Override Deny → Inherited"
-                          >
-                            <span
-                              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border transition-colors ${toggleColor}`}
-                            >
-                              <span
-                                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
-                                  checked ? "translate-x-5" : "translate-x-0.5"
-                                }`}
-                              />
-                            </span>
-                          </button>
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          ))}
 
-          {filteredOrphanKeys.length > 0 ? (
-            <section className="neo-card overflow-hidden rounded-2xl border border-amber-100 bg-white shadow-sm">
-              <div className="border-b border-amber-100 bg-amber-50/80 px-5 py-4">
-                <h2 className="text-sm font-black uppercase tracking-wider text-amber-900">
-                  ⚠️ {filteredOrphanKeys.length} permission keys returned from the server are not documented in{" "}
-                  <span className="font-mono">permissionCatalog.ts</span>.
-                </h2>
-                <p className="mt-1 text-xs font-medium text-amber-900/80">
-                  They are still functional but lack descriptions. Add them to the catalog for full documentation.
-                </p>
-              </div>
-              <div className="p-4 space-y-2">
-                {filteredOrphanKeys.map((key) => (
-                  <div
-                    key={key}
-                    className="flex items-center justify-between rounded-xl border border-amber-100 bg-white px-4 py-3"
-                  >
-                    <div className="min-w-0">
-                      <div className="font-mono text-xs font-bold text-slate-800">{key}</div>
-                      <div className="mt-0.5 text-xs text-slate-500">
-                        Not documented in <span className="font-mono">permissionCatalog.ts</span>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      className="inline-flex items-center justify-center rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-900 hover:bg-amber-100"
-                      title="Copy scaffold to clipboard"
-                      onClick={async () => {
-                        const scaffold = `"${key}": { title: "${key}", description: "TODO: Describe this permission." }`;
-                        try {
-                          await navigator.clipboard.writeText(scaffold);
-                          setPermissionsToast("Scaffold copied to clipboard. Paste into permissionCatalog.ts.");
-                          window.setTimeout(() => setPermissionsToast(null), 2500);
-                        } catch {
-                          setStatus("Could not access clipboard. Copy manually: " + scaffold);
-                        }
-                      }}
-                    >
-                      📝 Add to Catalog
-                    </button>
-                  </div>
-                ))}
-              </div>
+          {permissionMode === "role" ? (
+            <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+              <PermissionAssignmentPanel
+                mappings={permissionMappings}
+                onSave={async (apiRole, permissionKeys) => {
+                  await updateRolePermissions(apiRole, permissionKeys);
+                  const data = await fetchRolePermissions();
+                  setPermissionMappings(data.permissions);
+                  lastFetchedPermissionMappingsRef.current = data.permissions;
+                  setAvailablePermissionKeys(data.availableKeys);
+                  setStatus("Permissions updated successfully!");
+                }}
+              />
+            </section>
+          ) : null}
+
+          {permissionMode === "user" ? (
+            <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+              <UserPermissionOverridePanel
+                userRole={selectedPermissionUserRole}
+                rolePermissions={[...rolePermissionKeySet]}
+                overrides={userOverrideMap}
+                onOverridesChange={setUserOverrideMap}
+                searchQuery={permissionSearch}
+                disabled={selectedPermissionUserId == null}
+              />
             </section>
           ) : null}
 
@@ -1206,52 +709,6 @@ export function SettingsUsersRolesPanel() {
           ) : null}
         </div>
 
-        {confirmSaveRoleOpen ? (
-          <div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[2px]"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="confirm-save-role-title"
-            onClick={() => (isSaving ? null : setConfirmSaveRoleOpen(false))}
-          >
-            <div
-              className="w-full max-w-lg overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="border-b border-slate-100 bg-slate-50 px-6 py-4">
-                <h2 id="confirm-save-role-title" className="text-lg font-black text-[#0c2340]">
-                  Confirm permission update
-                </h2>
-                <p className="mt-1 text-sm font-medium text-slate-600">
-                  You are about to update permissions for{" "}
-                  <span className="font-bold text-slate-800">{ROLE_OPTIONS.length}</span> roles affecting all users in
-                  those roles. This takes effect immediately. Continue?
-                </p>
-              </div>
-              <div className="flex gap-3 border-t border-slate-100 bg-slate-50/80 px-6 py-4">
-                <button
-                  type="button"
-                  disabled={isSaving}
-                  onClick={() => setConfirmSaveRoleOpen(false)}
-                  className="flex-1 rounded-xl border border-slate-200 bg-white py-3 text-sm font-bold text-slate-600 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={isSaving}
-                  onClick={() => {
-                    setConfirmSaveRoleOpen(false);
-                    void handleSavePermissions();
-                  }}
-                  className="flex-1 rounded-xl bg-indigo-600 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-200 transition-all hover:bg-indigo-700 disabled:opacity-50"
-                >
-                  Confirm
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : null}
       </div>
     );
   }

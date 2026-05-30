@@ -31,26 +31,28 @@ export function filterValidPermissionKeys(keys: unknown[]): PermissionKey[] {
  * Gets all available permission keys organized by category
  */
 export function getPermissionsByCategory() {
+  const knownPrefixes = [
+    "nav_",
+    "students_",
+    "classes_",
+    "attendance_",
+    "staff_",
+    "curriculum_",
+    "finance_",
+    "communication_",
+    "settings_",
+  ] as const;
   return {
     navigation: PERMISSION_KEYS.filter((k) => k.startsWith("nav_")),
     students: PERMISSION_KEYS.filter((k) => k.startsWith("students_")),
     classes: PERMISSION_KEYS.filter((k) => k.startsWith("classes_")),
+    attendance: PERMISSION_KEYS.filter((k) => k.startsWith("attendance_")),
     staff: PERMISSION_KEYS.filter((k) => k.startsWith("staff_")),
     curriculum: PERMISSION_KEYS.filter((k) => k.startsWith("curriculum_")),
     finance: PERMISSION_KEYS.filter((k) => k.startsWith("finance_")),
     communication: PERMISSION_KEYS.filter((k) => k.startsWith("communication_")),
     settings: PERMISSION_KEYS.filter((k) => k.startsWith("settings_")),
-    other: PERMISSION_KEYS.filter(
-      (k) =>
-        !k.startsWith("nav_") &&
-        !k.startsWith("students_") &&
-        !k.startsWith("classes_") &&
-        !k.startsWith("staff_") &&
-        !k.startsWith("curriculum_") &&
-        !k.startsWith("finance_") &&
-        !k.startsWith("communication_") &&
-        !k.startsWith("settings_"),
-    ),
+    other: PERMISSION_KEYS.filter((k) => !knownPrefixes.some((p) => k.startsWith(p))),
   };
 }
 

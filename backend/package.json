@@ -12,6 +12,7 @@
     "hash-password": "node scripts/hash-password.mjs",
     "seed:admin": "tsx scripts/seed-admin.ts",
     "seed:permissions": "tsx scripts/seed-permissions.ts",
+    "seed:granular-permissions": "tsx scripts/seed-granular-permissions.ts",
     "seed:inbox": "tsx scripts/seed-inbox.ts",
     "seed:dashboard": "tsx scripts/seed-dashboard-data.ts",
     "seed:fee-config": "tsx scripts/seed-fee-config.ts",
